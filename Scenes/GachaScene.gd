@@ -107,6 +107,9 @@ var _suction_orbit_speed: float = 0.0
 var _awaiting_ssr_click: bool = false
 var _ssr_click_received: bool = false
 
+var _prev_root_mouse_filter: Control.MouseFilter = Control.MOUSE_FILTER_STOP
+var _prev_dim_mouse_filter: Control.MouseFilter = Control.MOUSE_FILTER_STOP
+
 var _host: Node = null
 var _skin_defs: Dictionary = {}
 
@@ -118,6 +121,9 @@ var _center_base_pos: Vector2 = Vector2.ZERO
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	_center_base_pos = center.position
+	# Default: don't let fullscreen overlays swallow button clicks.
+	root.mouse_filter = Control.MOUSE_FILTER_PASS
+	dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_ensure_suction_orbit()
 	_build_burst_rainbow_ramp()
 	_build_burst_mono_ramp()
@@ -151,6 +157,22 @@ func _process(delta: float) -> void:
 	_update_ripple_center_uv()
 
 
+func _input(event: InputEvent) -> void:
+	# Use _input to reliably capture taps even if UI consumes them.
+	if not _awaiting_ssr_click:
+		return
+	var pressed := false
+	if event is InputEventMouseButton:
+		var mb := event as InputEventMouseButton
+		pressed = mb.pressed
+	elif event is InputEventScreenTouch:
+		var st := event as InputEventScreenTouch
+		pressed = st.pressed
+	if pressed:
+		_ssr_click_received = true
+		get_viewport().set_input_as_handled()
+
+
 func _on_root_gui_input(event: InputEvent) -> void:
 	if not _awaiting_ssr_click:
 		return
@@ -169,6 +191,9 @@ func _on_root_gui_input(event: InputEvent) -> void:
 func _reset_visuals() -> void:
 	visible = true
 	dim.color.a = 0.0
+	# Keep interactive UI clickable.
+	root.mouse_filter = Control.MOUSE_FILTER_PASS
+	dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	if ripple_fx:
 		ripple_fx.modulate.a = 0.0
 	flash.color.a = 0.0
@@ -363,7 +388,6 @@ func _play_sequence(pack: Dictionary, best: Dictionary, count: int) -> void:
 	# SSR: keep bursting until player taps/clicks.
 	if has_ssr:
 		await _wait_for_ssr_click()
-		_set_emitters_emitting(_burst_emitters, false)
 
 	# Stage 3: Reveal
 	_set_emitters_emitting(_gather_emitters, false)
@@ -681,11 +705,19 @@ func _apply_burst_style(is_ssr: bool, tint_color: Color) -> void:
 func _wait_for_ssr_click() -> void:
 	_awaiting_ssr_click = true
 	_ssr_click_received = false
+	# Temporarily intercept taps anywhere on screen.
+	_prev_root_mouse_filter = root.mouse_filter
+	_prev_dim_mouse_filter = dim.mouse_filter
+	root.mouse_filter = Control.MOUSE_FILTER_STOP
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	# Reuse existing label to hint the interaction without adding new UI.
 	info_label.text = "點擊畫面揭曉"
 	while not _ssr_click_received:
 		await get_tree().process_frame
 	_awaiting_ssr_click = false
+	# Restore defaults so buttons work again.
+	root.mouse_filter = Control.MOUSE_FILTER_PASS
+	dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_refresh_ui()
 
 
