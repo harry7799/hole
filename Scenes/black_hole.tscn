@@ -1,0 +1,52 @@
+[gd_scene load_steps=8 format=3 uid="uid://dfg2665ac0ciu"]
+
+[ext_resource type="Script" uid="uid://dag2faoa1fxxq" path="res://Scripts/BlackHole.gd" id="1_yqibl"]
+[ext_resource type="Shader" uid="uid://dp3xvbsyhug41" path="res://Shaders/BlackHoleShader.gdshader" id="2_qcnit"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_qcnit"]
+radius = 500.0
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_hjqa0"]
+shader = ExtResource("2_qcnit")
+shader_parameter/center = Vector2(0.5, 0.495)
+shader_parameter/aspect_ratio = 1.0
+shader_parameter/tint_intensity = 0.0
+shader_parameter/radius = 0.315
+shader_parameter/strength = -0.82
+shader_parameter/aberration = 0.2
+
+[sub_resource type="Gradient" id="Gradient_hjqa0"]
+
+[sub_resource type="GradientTexture2D" id="GradientTexture2D_cv587"]
+gradient = SubResource("Gradient_hjqa0")
+
+[sub_resource type="Curve" id="Curve_wn18u"]
+_data = [Vector2(0, 1), 0.0, 0.0, 0, 0, Vector2(1, 0), 0.0, 0.0, 0, 0]
+point_count = 2
+
+[node name="BlackHole" type="Area2D"]
+z_index = 10
+position = Vector2(-1, 0)
+script = ExtResource("1_yqibl")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+z_index = -5
+scale = Vector2(2, 2)
+shape = SubResource("CircleShape2D_qcnit")
+
+[node name="BackBufferCopy" type="BackBufferCopy" parent="."]
+copy_mode = 2
+visible = false
+
+[node name="Visuals" type="Sprite2D" parent="."]
+material = SubResource("ShaderMaterial_hjqa0")
+
+[node name="GlitchParticles" type="CPUParticles2D" parent="."]
+emitting = false
+amount = 200
+texture = SubResource("GradientTexture2D_cv587")
+lifetime = 0.4
+explosiveness = 1.0
+emission_shape = 1
+emission_sphere_radius = 50.0
+scale_amount_curve = SubResource("Curve_wn18u")

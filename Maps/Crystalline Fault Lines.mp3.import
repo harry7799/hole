@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://cpikuas7qeb6a"
+path="res://.godot/imported/Crystalline Fault Lines.mp3-0f3b2ef7e37f48fa026e96bf4970d4b5.mp3str"
+
+[deps]
+
+source_file="res://Maps/Crystalline Fault Lines.mp3"
+dest_files=["res://.godot/imported/Crystalline Fault Lines.mp3-0f3b2ef7e37f48fa026e96bf4970d4b5.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

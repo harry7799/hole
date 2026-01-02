@@ -1,0 +1,29 @@
+[gd_scene load_steps=4 format=3 uid="uid://br3o0is7v1ugq"]
+
+[ext_resource type="Script" uid="uid://tvpb2v1cui5i" path="res://EnemyProjectile.gd" id="1_q8knp"]
+[ext_resource type="Texture2D" uid="uid://cvqwww2q3nap8" path="res://Scenes/黑洞遊戲_子彈圖案.png" id="2_ul6jj"]
+
+[sub_resource type="CanvasItemMaterial" id="CanvasItemMaterial_glow"]
+blend_mode = 1
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_bullet"]
+radius = 6.0
+
+[node name="EnemyProjectile" type="Area2D"]
+script = ExtResource("1_q8knp")
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+position = Vector2(1.9999998, -1.0000002)
+scale = Vector2(0.07, 0.07)
+material = SubResource("CanvasItemMaterial_glow")
+texture = ExtResource("2_ul6jj")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("CircleShape2D_bullet")
+
+[node name="LifetimeTimer" type="Timer" parent="."]
+one_shot = true
+autostart = true
+
+[connection signal="body_entered" from="." to="." method="_on_body_entered"]
+[connection signal="timeout" from="LifetimeTimer" to="." method="_on_lifetime_timer_timeout"]

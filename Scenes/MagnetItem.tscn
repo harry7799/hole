@@ -1,0 +1,19 @@
+[gd_scene load_steps=4 format=3 uid="uid://c17pgmv4f7vvl"]
+
+[ext_resource type="Script" uid="uid://berokerb6r2q6" path="res://Scenes/MagnetItem.gd" id="1_magnet"]
+[ext_resource type="Texture2D" uid="uid://cplpsgnqxtgnm" path="res://Scenes/mag2.png" id="2_kvgt1"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_1"]
+radius = 18.0
+
+[node name="MagnetItem" type="RigidBody2D"]
+gravity_scale = 0.0
+script = ExtResource("1_magnet")
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+position = Vector2(3, -3.0000076)
+scale = Vector2(1.2715706, 1.2815436)
+texture = ExtResource("2_kvgt1")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("CircleShape2D_1")

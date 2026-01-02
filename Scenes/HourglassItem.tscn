@@ -1,0 +1,19 @@
+[gd_scene load_steps=4 format=3 uid="uid://bcht0n10p6qt3"]
+
+[ext_resource type="Script" uid="uid://ysa45i6cial5" path="res://Scenes/HourglassItem.gd" id="1_hourglass"]
+[ext_resource type="Texture2D" uid="uid://bmwpxffavlln4" path="res://Scenes/stop.png" id="2_82hwy"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_1"]
+radius = 18.0
+
+[node name="HourglassItem" type="RigidBody2D"]
+gravity_scale = 0.0
+script = ExtResource("1_hourglass")
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+position = Vector2(-0.9999981, -2.000002)
+scale = Vector2(2.9074073, 2.7994258)
+texture = ExtResource("2_82hwy")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("CircleShape2D_1")

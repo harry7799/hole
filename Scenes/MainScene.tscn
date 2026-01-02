@@ -1,0 +1,382 @@
+[gd_scene load_steps=18 format=3 uid="uid://dmlxku3cybh56"]
+
+[ext_resource type="Script" uid="uid://dc6408o26t4tg" path="res://Scenes/Main.gd" id="1_7rqgy"]
+[ext_resource type="PackedScene" uid="uid://dfg2665ac0ciu" path="res://Scenes/black_hole.tscn" id="1_tr2i4"]
+[ext_resource type="AudioStream" uid="uid://b74rye6yxstui" path="res://Maps/Eternal Flow.mp3" id="2_8ju71"]
+[ext_resource type="PackedScene" uid="uid://dnp568fre8xn0" path="res://Scenes/SwallowableObject.tscn" id="2_nhkr4"]
+[ext_resource type="Texture2D" uid="uid://8qti0uto8eur" path="res://Scenes/1763922312623.png" id="3_nhkr4"]
+[ext_resource type="PackedScene" uid="uid://bhns1yg4swlnh" path="res://Scenes/Enemy.tscn" id="3_y4jh7"]
+[ext_resource type="Script" uid="uid://px1l5i07mobe" path="res://Scenes/PlayerController.gd" id="5_qxria"]
+[ext_resource type="PackedScene" uid="uid://dkqituocsw2ix" path="res://Scenes/FullScreenEffect.tscn" id="7_q68mp"]
+[ext_resource type="AudioStream" uid="uid://d2ac04fq2edkm" path="res://Maps/Echoes in the Night.mp3" id="8_battle_music"]
+[ext_resource type="AudioStream" uid="uid://gv6luakiid1m" path="res://810753__mokasza__level-up-01.mp3" id="9_4b75m"]
+[ext_resource type="Texture2D" uid="uid://cpwjxy8t6fntl" path="res://Scenes/setting2.png" id="9_6t1o7"]
+[ext_resource type="Texture2D" uid="uid://cgi7gxn6h0jus" path="res://Scenes/黑洞背景_簡約優雅版.png" id="9_xb4mg"]
+[ext_resource type="AudioStream" uid="uid://dclt3ijyh77rj" path="res://327735__distillerystudio__error_04.wav" id="10_8ju71"]
+[ext_resource type="Script" uid="uid://krn35tfe8ppb" path="res://Scripts/ObjectiveArrow.gd" id="11_objective_arrow"]
+
+[sub_resource type="Gradient" id="Gradient_y4jh7"]
+offsets = PackedFloat32Array(0.2, 0.3, 0.63716817, 0.7, 0.72861356, 0.8, 0.8761062, 1)
+colors = PackedColorArray(0, 0, 0, 1, 0, 0.9576729, 0.54272664, 1, 1, 0.6349951, 0.4566689, 1, 0.7581121, 0.7581121, 0.7581121, 1, 0.72861356, 0.72861356, 0.72861356, 1, 0.8745098, 0, 0.8235294, 1, 0.8761062, 0.8761062, 0.8761062, 1, 1, 1, 1, 1)
+metadata/_snap_enabled = true
+metadata/_snap_count = 58
+
+[sub_resource type="GradientTexture2D" id="GradientTexture2D_q68mp"]
+gradient = SubResource("Gradient_y4jh7")
+
+[sub_resource type="Curve" id="Curve_y4jh7"]
+_data = [Vector2(0, 1), 0.0, 0.0, 0, 0, Vector2(1, 0), 0.0, 0.0, 0, 0]
+point_count = 2
+
+[node name="MainScene" type="Node2D" groups=["MainScene", "Player"]]
+script = ExtResource("1_7rqgy")
+menu_music = ExtResource("2_8ju71")
+battle_music = ExtResource("8_battle_music")
+object_scene = ExtResource("2_nhkr4")
+enemy_scene = ExtResource("3_y4jh7")
+
+[node name="BlackHole" parent="." groups=["Player"] instance=ExtResource("1_tr2i4")]
+unique_name_in_owner = true
+position = Vector2(360, 640)
+debug_force_assign_fullscreen_fallback = false
+
+[node name="GlitchParticles2" type="CPUParticles2D" parent="BlackHole"]
+emitting = false
+amount = 200
+texture = SubResource("GradientTexture2D_q68mp")
+lifetime = 0.42
+one_shot = true
+explosiveness = 1.0
+scale_amount_curve = SubResource("Curve_y4jh7")
+
+[node name="Camera2D" type="Camera2D" parent="."]
+unique_name_in_owner = true
+position = Vector2(360, 640)
+
+[node name="StarBackground" type="Sprite2D" parent="Camera2D"]
+z_index = -10
+texture_repeat = 3
+position = Vector2(1, 1)
+rotation = -0.8035941
+texture = ExtResource("3_nhkr4")
+region_enabled = true
+region_rect = Rect2(0, 0, 4000, 4000)
+
+[node name="CanvasLayer" type="CanvasLayer" parent="."]
+layer = 0
+
+[node name="FullScreenEffect" parent="CanvasLayer" instance=ExtResource("7_q68mp")]
+unique_name_in_owner = true
+visible = true
+
+[node name="HUD" type="Control" parent="CanvasLayer"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 1
+
+[node name="HUDPanel" type="PanelContainer" parent="CanvasLayer/HUD"]
+layout_mode = 1
+offset_left = 14.0
+offset_top = 14.0
+offset_right = 320.0
+offset_bottom = 210.0
+grow_horizontal = 2
+
+[node name="MarginContainer" type="MarginContainer" parent="CanvasLayer/HUD/HUDPanel"]
+layout_mode = 2
+theme_override_constants/margin_left = 10
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 10
+theme_override_constants/margin_bottom = 8
+
+[node name="VBoxContainer" type="VBoxContainer" parent="CanvasLayer/HUD/HUDPanel/MarginContainer"]
+layout_mode = 2
+
+[node name="TimeLabel" type="Label" parent="CanvasLayer/HUD/HUDPanel/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+
+[node name="EntropyLabel" type="Label" parent="CanvasLayer/HUD/HUDPanel/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 16
+text = "核心穩定度 (質量蒸發中)"
+
+[node name="SpacingControl" type="Control" parent="CanvasLayer/HUD/HUDPanel/MarginContainer/VBoxContainer"]
+layout_mode = 2
+
+[node name="StabilityBar" type="ProgressBar" parent="CanvasLayer/HUD/HUDPanel/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+modulate = Color(0.8543323, 0.37203556, 0.7591514, 1)
+custom_minimum_size = Vector2(0, 16)
+layout_mode = 2
+
+[node name="WantedLabel" type="Label" parent="CanvasLayer/HUD/HUDPanel/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+
+[node name="TextureRect" type="TextureRect" parent="CanvasLayer/HUD/HUDPanel/MarginContainer/VBoxContainer"]
+visible = false
+layout_mode = 2
+texture = ExtResource("3_nhkr4")
+
+[node name="LevelLabel" type="Label" parent="CanvasLayer/HUD/HUDPanel/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "核心等級：Lv.1"
+
+[node name="ScoreLabel" type="Label" parent="CanvasLayer/HUD/HUDPanel/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 22
+text = "已吞噬：0"
+
+[node name="FeverBar" type="ProgressBar" parent="CanvasLayer/HUD/HUDPanel/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+visible = false
+custom_minimum_size = Vector2(0, 18)
+layout_mode = 2
+max_value = 10.0
+step = 1.0
+show_percentage = false
+
+[node name="EMP_Button" type="Button" parent="CanvasLayer/HUD/HUDPanel/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "看廣告：啟動 EMP 衝擊波"
+
+[node name="ShockwaveButton" type="Button" parent="CanvasLayer/HUD/HUDPanel/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "重力衝擊波（雙擊或點此）"
+
+[node name="MusicPitchToggle" type="CheckBox" parent="CanvasLayer/HUD/HUDPanel/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+text = "啟用動態BGM變速"
+
+[node name="SettingsButton" type="TextureButton" parent="CanvasLayer/HUD"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(44, 44)
+layout_mode = 0
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -54.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = 54.0
+tooltip_text = "設定"
+texture_normal = ExtResource("9_6t1o7")
+ignore_texture_size = true
+stretch_mode = 5
+
+[node name="MainMenu" type="Control" parent="CanvasLayer"]
+unique_name_in_owner = true
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 1
+
+[node name="MenuBackground" type="TextureRect" parent="CanvasLayer/MainMenu"]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+texture = ExtResource("9_xb4mg")
+expand_mode = 1
+stretch_mode = 6
+
+[node name="Dim" type="ColorRect" parent="CanvasLayer/MainMenu"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0, 0, 0, 0.55)
+
+[node name="CenterContainer" type="CenterContainer" parent="CanvasLayer/MainMenu"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="PanelContainer" type="PanelContainer" parent="CanvasLayer/MainMenu/CenterContainer"]
+custom_minimum_size = Vector2(0, 320)
+layout_mode = 2
+
+[node name="MarginContainer" type="MarginContainer" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer"]
+layout_mode = 2
+theme_override_constants/margin_left = 24
+theme_override_constants/margin_top = 22
+theme_override_constants/margin_right = 24
+theme_override_constants/margin_bottom = 22
+
+[node name="VBoxContainer" type="VBoxContainer" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer"]
+layout_mode = 2
+theme_override_constants/separation = 14
+
+[node name="Title" type="Label" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 56
+text = "黑洞核心"
+horizontal_alignment = 1
+
+[node name="Subtitle" type="Label" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer"]
+layout_mode = 2
+text = "吞噬數據，對抗熵增"
+horizontal_alignment = 1
+
+[node name="CampaignStartButton" type="Button" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 56)
+layout_mode = 2
+text = "開始遊戲（關卡制）"
+
+[node name="StartButton" type="Button" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 50)
+layout_mode = 2
+text = "無盡模式"
+
+[node name="CoinsLabel" type="Label" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "金幣：0"
+horizontal_alignment = 1
+
+[node name="MetaButtonsRow" type="HBoxContainer" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/separation = 12
+alignment = 1
+
+[node name="SkinsButton" type="Button" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer/MetaButtonsRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+text = "Skins"
+
+[node name="UpgradesButton" type="Button" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer/MetaButtonsRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+text = "Upgrades"
+
+[node name="MenuSettingsButton" type="Button" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer/MetaButtonsRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+text = "設定"
+
+[node name="IdleRewardsButton" type="Button" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+text = "離線收益"
+
+[node name="Hint" type="Label" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer"]
+layout_mode = 2
+text = "方向鍵 / 觸控移動，Shift 加速（消耗穩定度）"
+horizontal_alignment = 1
+
+[node name="FeedbackLayer" type="CanvasLayer" parent="."]
+layer = 200
+
+[node name="CampaignGoldOverlay" type="ColorRect" parent="FeedbackLayer"]
+unique_name_in_owner = true
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(1, 0.85, 0.2, 0)
+
+[node name="DamageFlash" type="ColorRect" parent="FeedbackLayer"]
+unique_name_in_owner = true
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(1, 0, 0, 0)
+
+[node name="WantedOverlay" type="ColorRect" parent="FeedbackLayer"]
+unique_name_in_owner = true
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(1, 0.1, 0.1, 0)
+
+[node name="ObjectiveArrow" type="Control" parent="FeedbackLayer"]
+unique_name_in_owner = true
+visible = false
+z_index = 10
+layout_mode = 3
+anchors_preset = 0
+mouse_filter = 2
+script = ExtResource("11_objective_arrow")
+
+[node name="ToastLabel" type="Label" parent="FeedbackLayer"]
+unique_name_in_owner = true
+modulate = Color(1, 1, 1, 0)
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -360.0
+offset_top = 24.0
+offset_right = 360.0
+offset_bottom = 110.0
+theme_override_font_sizes/font_size = 44
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="ShockwaveRing" type="Line2D" parent="FeedbackLayer"]
+unique_name_in_owner = true
+visible = false
+closed = true
+default_color = Color(0.35, 1, 1, 0)
+
+[node name="PlayerController" type="Node2D" parent="."]
+script = ExtResource("5_qxria")
+desktop_mouse_follow_without_click = false
+
+[node name="SfxLevelUp" type="AudioStreamPlayer" parent="."]
+unique_name_in_owner = true
+stream = ExtResource("9_4b75m")
+volume_db = -2.0
+
+[node name="SfxWantedUp" type="AudioStreamPlayer" parent="."]
+unique_name_in_owner = true
+stream = ExtResource("10_8ju71")
+volume_db = -2.0
+
+[connection signal="body_entered" from="BlackHole" to="BlackHole" method="_on_black_hole_body_entered"]
+[connection signal="pressed" from="CanvasLayer/HUD/SettingsButton" to="." method="_on_settings_pressed"]
+[connection signal="pressed" from="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer/CampaignStartButton" to="." method="_on_start_campaign_pressed"]
+[connection signal="pressed" from="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer/StartButton" to="." method="_on_start_game_pressed"]
+[connection signal="pressed" from="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer/MetaButtonsRow/MenuSettingsButton" to="." method="_on_settings_pressed"]

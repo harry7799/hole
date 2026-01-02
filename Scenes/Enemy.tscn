@@ -1,0 +1,37 @@
+[gd_scene load_steps=10 format=3 uid="uid://bhns1yg4swlnh"]
+
+[ext_resource type="Script" uid="uid://kgbn54un0lp3" path="res://Enemy.gd" id="1_m1htj"]
+[ext_resource type="Texture2D" uid="uid://bn8003hwtedut" path="res://Shaders/5.png" id="2_wovta"]
+[ext_resource type="PackedScene" uid="uid://br3o0is7v1ugq" path="res://EnemyProjectile.tscn" id="2_xeo28"]
+[ext_resource type="Texture2D" uid="uid://dj5mvxg3ptaep" path="res://Shaders/E4.png" id="3_uoxpr"]
+[ext_resource type="Texture2D" uid="uid://da0qnfrq5tfvx" path="res://Shaders/E2.png" id="4_6bs3c"]
+[ext_resource type="Texture2D" uid="uid://baohu7q1jfl5" path="res://Shaders/E3.png" id="5_uoxpr"]
+[ext_resource type="Texture2D" uid="uid://cah2omn38vj54" path="res://Shaders/E5.png" id="7_0o0ue"]
+[ext_resource type="Texture2D" uid="uid://bo0eybhvjsfc5" path="res://Shaders/E0.png" id="7_idouy"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_xeo28"]
+radius = 101.636604
+
+[node name="Enemy" type="Area2D" groups=["Enemies"]]
+scale = Vector2(0.9, 0.9)
+script = ExtResource("1_m1htj")
+eject_count = 5
+projectile_scene = ExtResource("2_xeo28")
+stage_enemy_textures = Array[Texture2D]([ExtResource("3_uoxpr"), ExtResource("2_wovta"), ExtResource("4_6bs3c"), ExtResource("5_uoxpr"), ExtResource("7_idouy"), ExtResource("7_0o0ue")])
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("CircleShape2D_xeo28")
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+position = Vector2(0, -4)
+rotation = -3.1415927
+texture = ExtResource("2_wovta")
+
+[node name="ShootTimer" type="Timer" parent="."]
+wait_time = 2.0
+autostart = true
+
+[node name="Muzzle" type="Marker2D" parent="."]
+position = Vector2(-5, 146)
+
+[connection signal="body_entered" from="." to="." method="_on_body_entered"]
