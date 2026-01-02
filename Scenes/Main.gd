@@ -1016,9 +1016,24 @@ func _setup_music() -> void:
 	_music_player = AudioStreamPlayer.new()
 	_music_player.volume_db = battle_music_volume_db
 	_music_player.autoplay = false
+	# Auto-loop: replay when the stream finishes.
+	if not _music_player.finished.is_connected(_on_music_finished):
+		_music_player.finished.connect(_on_music_finished)
 	add_child(_music_player)
 	_refresh_music_by_state()
 	_update_meta_ui()
+
+
+func _on_music_finished() -> void:
+	# Replay the currently selected music when it reaches the end.
+	if not _music_player or not is_instance_valid(_music_player):
+		return
+	if not _current_music_stream:
+		return
+	# Only loop if we are still on the same stream.
+	if _music_player.stream != _current_music_stream:
+		return
+	_music_player.play()
 
 
 func _play_music(stream: AudioStream) -> void:
