@@ -18,6 +18,7 @@ extends Node2D
 @onready var campaign_start_button = get_node_or_null("%CampaignStartButton") as Button
 @onready var coins_label = get_node_or_null("%CoinsLabel") as Label
 @onready var skins_button = get_node_or_null("%SkinsButton") as Button
+@onready var gacha_button = get_node_or_null("%GachaButton") as Button
 @onready var upgrades_button = get_node_or_null("%UpgradesButton") as Button
 @onready var toast_label = %ToastLabel
 @onready var damage_flash = %DamageFlash
@@ -154,6 +155,16 @@ var _skins_preview: TextureRect = null
 var _skins_unlock_button: Button = null
 var _skins_coin_unlock_button: Button = null
 
+var _gacha_dialog: AcceptDialog = null
+var _gacha_info_label: Label = null
+var _gacha_result_label: RichTextLabel = null
+var _gacha_single_button: Button = null
+var _gacha_ten_button: Button = null
+
+const GACHA_SCENE: PackedScene = preload("res://Scenes/GachaScene.tscn")
+var _gacha_overlay: CanvasLayer = null
+var _paused_by_gacha: bool = false
+
 var _maps_dialog: AcceptDialog = null
 var _maps_option: OptionButton = null
 var _maps_preview: TextureRect = null
@@ -179,9 +190,75 @@ var _reset_upgrades_button: Button = null
 var _reset_upgrades_confirm_dialog: ConfirmationDialog = null
 
 var _skin_defs: Dictionary = {
-	"classic": {"name": "Classic", "texture": preload("res://Shaders/M.png"), "price": 0},
-	"vortex": {"name": "Vortex", "texture": preload("res://Shaders/M2.png"), "price": 800},
-	"neon": {"name": "Neon", "texture": preload("res://Shaders/M4.png"), "price": 1200}
+	# NOTE: BlackHole visuals are screen-distortion; skins are expressed as an additive overlay + shader multipliers.
+	"classic": {
+		"name": "Classic",
+		"texture": preload("res://Shaders/M.png"),
+		"price": 0,
+		"overlay_color": Color(1.0, 1.0, 1.0, 1.0),
+		"overlay_alpha": 0.18,
+		"overlay_spin": 55.0,
+		"strength_mult": 1.0,
+		"aberration_mult": 1.0,
+		"fever_ring_color": Color(1.0, 0.86, 0.25, 1.0),
+	},
+	"vortex": {
+		"name": "Vortex",
+		"texture": preload("res://Shaders/M2.png"),
+		"price": 800,
+		"overlay_color": Color(0.35, 0.85, 1.0, 1.0),
+		"overlay_alpha": 0.55,
+		"overlay_spin": -170.0,
+		"strength_mult": 1.25,
+		"aberration_mult": 1.35,
+		"fever_ring_color": Color(0.45, 0.9, 1.0, 1.0),
+	},
+	"neon": {
+		"name": "Neon",
+		"texture": preload("res://Shaders/M4.png"),
+		"price": 1200,
+		"overlay_color": Color(1.0, 0.25, 0.85, 1.0),
+		"overlay_alpha": 0.62,
+		"overlay_spin": 240.0,
+		"strength_mult": 1.45,
+		"aberration_mult": 1.65,
+		"ripple_strength_mult": 1.25,
+		"ripple_speed_mult": 1.2,
+		"visual_tint": Color(1.0, 0.95, 1.0, 1.0),
+		"fever_ring_color": Color(1.0, 0.25, 0.85, 1.0),
+	},
+
+	# SSR tier (for future gacha): extremely obvious, premium feel.
+	"ssr_eclipse": {
+		"name": "SSR: Eclipse",
+		"texture": preload("res://Shaders/11.png"),
+		"price": 999999,
+		"gacha_only": true,
+		"overlay_color": Color(0.65, 0.9, 1.0, 1.0),
+		"overlay_alpha": 0.78,
+		"overlay_spin": -420.0,
+		"strength_mult": 1.85,
+		"aberration_mult": 2.25,
+		"ripple_strength_mult": 1.7,
+		"ripple_speed_mult": 1.35,
+		"visual_tint": Color(0.9, 1.0, 1.05, 1.0),
+		"fever_ring_color": Color(0.55, 0.95, 1.0, 1.0),
+	},
+	"ssr_singularity": {
+		"name": "SSR: Singularity",
+		"texture": preload("res://Shaders/15.png"),
+		"price": 999999,
+		"gacha_only": true,
+		"overlay_color": Color(1.0, 0.45, 0.18, 1.0),
+		"overlay_alpha": 0.82,
+		"overlay_spin": 520.0,
+		"strength_mult": 2.05,
+		"aberration_mult": 2.5,
+		"ripple_strength_mult": 1.85,
+		"ripple_speed_mult": 1.45,
+		"visual_tint": Color(1.05, 0.95, 0.9, 1.0),
+		"fever_ring_color": Color(1.0, 0.55, 0.18, 1.0),
+	}
 }
 
 var _builtin_skin_defs: Dictionary = {}
@@ -1154,6 +1231,10 @@ func _setup_meta_dialogs() -> void:
 		skins_button = find_child("SkinsButton", true, false) as Button
 	if skins_button and not skins_button.pressed.is_connected(_on_skins_pressed):
 		skins_button.pressed.connect(_on_skins_pressed)
+	if not gacha_button:
+		gacha_button = find_child("GachaButton", true, false) as Button
+	if gacha_button and not gacha_button.pressed.is_connected(_on_gacha_pressed):
+		gacha_button.pressed.connect(_on_gacha_pressed)
 	if not upgrades_button:
 		upgrades_button = find_child("UpgradesButton", true, false) as Button
 	if upgrades_button and not upgrades_button.pressed.is_connected(_on_upgrades_pressed):
@@ -1246,6 +1327,9 @@ func _load_meta() -> void:
 		sfx_volume_db = float(cfg.get_value("settings", "sfx_volume_db", sfx_volume_db))
 		meta_campaign_cleared = bool(cfg.get_value("campaign", "cleared", false))
 		meta_campaign_max_unlocked = int(cfg.get_value("campaign", "max_unlocked", 1))
+		if has_node("/root/GachaManager"):
+			var gm = get_node("/root/GachaManager")
+			gm.load_from_config(cfg)
 	else:
 		meta_coins = 0
 		_pending_idle_reward_coins = 0
@@ -1261,6 +1345,9 @@ func _load_meta() -> void:
 		meta_selected_bgm_id = "default"
 		meta_campaign_cleared = false
 		meta_campaign_max_unlocked = 1
+		if has_node("/root/GachaManager"):
+			var gm2 = get_node("/root/GachaManager")
+			gm2.load_from_config(cfg)
 
 	meta_campaign_max_unlocked = clampi(meta_campaign_max_unlocked, 1, CAMPAIGN_LEVEL_COUNT)
 
@@ -1300,7 +1387,229 @@ func _save_meta() -> void:
 	cfg.set_value("settings", "sfx_volume_db", sfx_volume_db)
 	cfg.set_value("campaign", "cleared", meta_campaign_cleared)
 	cfg.set_value("campaign", "max_unlocked", meta_campaign_max_unlocked)
+	if has_node("/root/GachaManager"):
+		var gm3 = get_node("/root/GachaManager")
+		gm3.save_to_config(cfg)
 	cfg.save(_get_meta_save_path())
+
+
+func _setup_gacha_dialog() -> void:
+	if _gacha_dialog:
+		return
+	_gacha_dialog = AcceptDialog.new()
+	_gacha_dialog.title = "抽獎"
+	_gacha_dialog.dialog_text = ""
+	_gacha_dialog.unresizable = true
+	_gacha_dialog.min_size = Vector2i(720, 420)
+	_gacha_dialog.size = Vector2i(720, 420)
+	_gacha_dialog.ok_button_text = "關閉"
+	add_child(_gacha_dialog)
+
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 22)
+	margin.add_theme_constant_override("margin_right", 22)
+	margin.add_theme_constant_override("margin_top", 18)
+	margin.add_theme_constant_override("margin_bottom", 18)
+	_gacha_dialog.add_child(margin)
+
+	var root := VBoxContainer.new()
+	root.add_theme_constant_override("separation", 12)
+	margin.add_child(root)
+
+	var info := Label.new()
+	info.add_theme_font_size_override("font_size", 20)
+	info.text = ""
+	_gacha_info_label = info
+	root.add_child(info)
+
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 10)
+	root.add_child(btn_row)
+
+	var single_btn := Button.new()
+	single_btn.text = "單抽"
+	btn_row.add_child(single_btn)
+	_gacha_single_button = single_btn
+	single_btn.pressed.connect(func():
+		_on_gacha_roll_pressed(1)
+	)
+
+	var ten_btn := Button.new()
+	ten_btn.text = "十連"
+	btn_row.add_child(ten_btn)
+	_gacha_ten_button = ten_btn
+	ten_btn.pressed.connect(func():
+		_on_gacha_roll_pressed(10)
+	)
+
+	var hint := Label.new()
+	hint.add_theme_font_size_override("font_size", 16)
+	hint.modulate = Color(0.9, 0.9, 0.9)
+	hint.text = "抽到的 Skin 會自動解鎖，可至 Skins 套用。重複獲得會轉換為金幣。"
+	root.add_child(hint)
+
+	var res := RichTextLabel.new()
+	res.fit_content = true
+	res.scroll_active = true
+	res.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	res.custom_minimum_size = Vector2(0, 220)
+	_gacha_result_label = res
+	root.add_child(res)
+
+	_update_gacha_ui()
+
+
+func _on_gacha_pressed() -> void:
+	_open_gacha_scene()
+
+
+func _open_gacha_scene() -> void:
+	if _gacha_overlay and is_instance_valid(_gacha_overlay):
+		return
+	_reload_skin_defs_from_folder()
+	var overlay := GACHA_SCENE.instantiate() as CanvasLayer
+	_gacha_overlay = overlay
+	add_child(overlay)
+	if overlay.has_signal("closed"):
+		overlay.connect("closed", _on_gacha_scene_closed)
+	# Pause gameplay while the animation runs (if in-game).
+	if game_started and not is_game_over and not get_tree().paused:
+		get_tree().paused = true
+		_paused_by_gacha = true
+	# Initialize.
+	if overlay.has_method("setup"):
+		overlay.call("setup", self, _skin_defs)
+
+
+func _on_gacha_scene_closed() -> void:
+	if _paused_by_gacha:
+		get_tree().paused = false
+		_paused_by_gacha = false
+	_gacha_overlay = null
+	# Refresh meta UI in case coins/unlocks changed.
+	_update_meta_ui()
+	_refresh_skins_ui()
+
+
+func get_meta_coins() -> int:
+	return meta_coins
+
+
+func do_gacha_roll(count: int) -> Dictionary:
+	# Called by GachaScene overlay.
+	if not has_node("/root/GachaManager"):
+		return {"ok": false, "error": "GachaManager missing"}
+	var gm = get_node("/root/GachaManager")
+	var cost := int(gm.single_cost_coins if count == 1 else gm.ten_cost_coins)
+	if meta_coins < cost:
+		_show_toast("金幣不足", Color.ORANGE)
+		return {"ok": false, "error": "not_enough_coins"}
+
+	meta_coins -= cost
+	var pack: Dictionary = gm.roll(count, meta_unlocked_skins)
+	var new_unlocks: Array = pack.get("new_unlocks", []) as Array
+	var total_refund: int = int(pack.get("total_refund_coins", 0))
+	for skin_id_v in new_unlocks:
+		var skin_id := String(skin_id_v)
+		meta_unlocked_skins[skin_id] = true
+	if total_refund > 0:
+		meta_coins += total_refund
+
+	_save_meta()
+	_update_meta_ui()
+	_refresh_skins_ui()
+
+	return {"ok": true, "pack": pack}
+
+
+func _update_gacha_ui() -> void:
+	if not _gacha_dialog:
+		return
+	var pity := 0
+	var total := 0
+	var single_cost := 500
+	var ten_cost := 4500
+	var rate_note := ""
+	if has_node("/root/GachaManager"):
+		var gm = get_node("/root/GachaManager")
+		pity = int(gm.get_ssr_pity_counter())
+		total = int(gm.get_total_rolls())
+		single_cost = int(gm.single_cost_coins)
+		ten_cost = int(gm.ten_cost_coins)
+		var rates: Dictionary = gm.get_rarity_rate_map()
+		if not rates.is_empty():
+			var r_rate := float(rates.get("R", 0.0))
+			var ssr_rate := float(rates.get("SSR", 0.0))
+			rate_note = "   機率：R %.1f%% / SSR %.1f%%" % [r_rate * 100.0, ssr_rate * 100.0]
+	if _gacha_info_label:
+		var pity_max := 30
+		if has_node("/root/GachaManager"):
+			var gm4 = get_node("/root/GachaManager")
+			pity_max = int(gm4.ssr_pity_max)
+		_gacha_info_label.text = "金幣：%d   SSR 保底累計：%d/%d   總抽數：%d%s" % [meta_coins, pity, max(1, pity_max), total, rate_note]
+	if _gacha_single_button:
+		_gacha_single_button.text = "單抽（%d 金幣）" % single_cost
+		_gacha_single_button.disabled = meta_coins < single_cost
+	if _gacha_ten_button:
+		_gacha_ten_button.text = "十連（%d 金幣）" % ten_cost
+		_gacha_ten_button.disabled = meta_coins < ten_cost
+
+
+func _on_gacha_roll_pressed(count: int) -> void:
+	if not has_node("/root/GachaManager"):
+		_show_toast("GachaManager 未啟用", Color.ORANGE)
+		return
+	var gm = get_node("/root/GachaManager")
+	var cost := int(gm.single_cost_coins if count == 1 else gm.ten_cost_coins)
+	if meta_coins < cost:
+		_show_toast("金幣不足", Color.ORANGE)
+		return
+
+	meta_coins -= cost
+	var pack: Dictionary = gm.roll(count, meta_unlocked_skins)
+	var new_unlocks: Array = pack.get("new_unlocks", []) as Array
+	var total_refund: int = int(pack.get("total_refund_coins", 0))
+
+	for skin_id_v in new_unlocks:
+		var skin_id := String(skin_id_v)
+		meta_unlocked_skins[skin_id] = true
+
+	if total_refund > 0:
+		meta_coins += total_refund
+
+	_save_meta()
+	_update_meta_ui()
+	_refresh_skins_ui()
+
+	_render_gacha_results(pack)
+	_update_gacha_ui()
+
+
+func _render_gacha_results(pack: Dictionary) -> void:
+	if not _gacha_result_label:
+		return
+	_gacha_result_label.clear()
+	var results: Array = pack.get("results", []) as Array
+	var new_unlocks: Array = pack.get("new_unlocks", []) as Array
+	var refund: int = int(pack.get("total_refund_coins", 0))
+
+	_gacha_result_label.append_text("本次結果：\n")
+	for r_v in results:
+		var r := r_v as Dictionary
+		var skin_id := String(r.get("skin_id", ""))
+		var rarity := String(r.get("rarity", "R"))
+		var is_dup := bool(r.get("is_duplicate", false))
+		var def: Dictionary = _skin_defs.get(skin_id, {}) as Dictionary
+		var nm := String(def.get("name", skin_id))
+		var tag := "[SSR]" if rarity == "SSR" else "[R]"
+		var suffix := "（重複）" if is_dup else "（NEW）"
+		_gacha_result_label.append_text("- %s %s %s\n" % [tag, nm, suffix])
+
+	if refund > 0:
+		_gacha_result_label.append_text("\n重複轉換：+%d 金幣\n" % refund)
+	if new_unlocks.size() > 0:
+		_gacha_result_label.append_text("\n已解鎖 %d 個 Skin：可至 Skins 套用\n" % new_unlocks.size())
+
 
 
 func _update_meta_ui() -> void:
@@ -1375,7 +1684,18 @@ func _reload_skin_defs_from_folder() -> void:
 		var tex: Texture2D = load("res://Skins/%s" % fn) as Texture2D
 		if not tex:
 			continue
-		_skin_defs[id] = {"name": id, "texture": tex, "price": 800}
+		# Default profile for custom skins (texture + readable glow).
+		_skin_defs[id] = {
+			"name": id,
+			"texture": tex,
+			"price": 800,
+			"overlay_color": Color(0.9, 0.9, 0.9, 1.0),
+			"overlay_alpha": 0.5,
+			"overlay_spin": 120.0,
+			"strength_mult": 1.15,
+			"aberration_mult": 1.25,
+			"fever_ring_color": Color(1.0, 0.92, 0.35, 1.0),
+		}
 	dir.list_dir_end()
 
 
@@ -1512,10 +1832,17 @@ func _apply_selected_skin() -> void:
 	var def: Dictionary = _skin_defs.get(meta_selected_skin, {}) as Dictionary
 	if def.is_empty():
 		return
-	var tex: Texture2D = def.get("texture") as Texture2D
 	var black_hole = %BlackHole
-	if black_hole and black_hole.has_method("apply_skin_texture"):
+	if black_hole and black_hole.has_method("apply_skin_def"):
+		black_hole.apply_skin_def(def)
+	elif black_hole and black_hole.has_method("apply_skin_texture"):
+		var tex: Texture2D = def.get("texture") as Texture2D
 		black_hole.apply_skin_texture(tex)
+
+
+func get_selected_skin_def() -> Dictionary:
+	# Called by BlackHole.gd at runtime to apply the currently selected skin profile.
+	return _skin_defs.get(meta_selected_skin, {}) as Dictionary
 
 
 func _apply_upgrades_to_runtime() -> void:
@@ -2045,8 +2372,11 @@ func _refresh_skins_ui() -> void:
 	var selected_idx := 0
 	for skin_id in _skin_defs.keys():
 		var def: Dictionary = _skin_defs[skin_id]
-		var nm: String = String(def.get("name", skin_id))
 		var unlocked: bool = meta_unlocked_skins.has(skin_id) and bool(meta_unlocked_skins[skin_id])
+		# Hide gacha-only skins until obtained.
+		if bool(def.get("gacha_only", false)) and not unlocked:
+			continue
+		var nm: String = String(def.get("name", skin_id))
 		var label := ""
 		if unlocked:
 			label = "%s（已解鎖）" % nm

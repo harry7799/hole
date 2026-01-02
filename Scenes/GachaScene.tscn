@@ -1,0 +1,212 @@
+[gd_scene load_steps=10 format=3 uid="uid://e4isixq7dx10"]
+
+[ext_resource type="Script" uid="uid://dkqo5s0brxo3j" path="res://Scenes/GachaScene.gd" id="1_gacha_script"]
+[ext_resource type="Shader" uid="uid://cmhspclvnlq57" path="res://Shaders/GachaScreenFX.gdshader" id="2_gacha_fx"]
+[ext_resource type="Texture2D" uid="uid://cv51y1pf3mmbu" path="res://Shaders/M.png" id="3_bh_tex"]
+[ext_resource type="AudioStream" uid="uid://gv6luakiid1m" path="res://810753__mokasza__level-up-01.mp3" id="4_ssr_sfx"]
+[ext_resource type="Shader" uid="uid://bvff0w2xmxxm8" path="res://Shaders/FullScreenDistort.gdshader" id="5_ripple_fx"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_ripple"]
+shader = ExtResource("5_ripple_fx")
+shader_parameter/center_uv = Vector2(0.5, 0.5)
+shader_parameter/distort_radius = 0.0
+shader_parameter/distort_strength = 0.0
+shader_parameter/distort_speed = 0.0
+shader_parameter/distort_frequency = 5.0
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_fx"]
+shader = ExtResource("2_gacha_fx")
+shader_parameter/center_uv = Vector2(0.5, 0.5)
+shader_parameter/radial_blur_strength = 0.0
+shader_parameter/chroma_aberration = 0.0
+shader_parameter/tint = Vector4(1, 1, 1, 1)
+
+[sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_gather"]
+lifetime_randomness = 0.2
+particle_flag_disable_z = true
+initial_velocity_min = 30.0
+initial_velocity_max = 220.0
+angular_velocity_min = -220.0
+angular_velocity_max = 220.0
+gravity = Vector3(0, 98, 0)
+scale_min = 0.35
+scale_max = 0.9
+color = Color(0.6, 0.9, 1, 1)
+
+[sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_burst"]
+lifetime_randomness = 0.05
+particle_flag_disable_z = true
+initial_velocity_min = 260.0
+initial_velocity_max = 980.0
+angular_velocity_min = -420.0
+angular_velocity_max = 420.0
+gravity = Vector3(0, 98, 0)
+scale_min = 0.45
+scale_max = 1.2
+color = Color(1, 0.88, 0.35, 1)
+
+[node name="GachaLayer" type="CanvasLayer"]
+layer = 2000
+script = ExtResource("1_gacha_script")
+prelude_duration = 0.85
+flash_fade_duration = 0.32
+suction_ramp_duration = 0.75
+max_radial_blur = 2.6
+fx_tint_intensity = 0.45
+color_r = Color(0.89855266, 0.6145675, 0.7408517, 1)
+
+[node name="SfxSSR" type="AudioStreamPlayer" parent="."]
+stream = ExtResource("4_ssr_sfx")
+volume_db = -3.0
+
+[node name="Root" type="Control" parent="."]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 1
+
+[node name="Dim" type="ColorRect" parent="Root"]
+layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0, 0, 0, 0)
+
+[node name="RippleFX" type="ColorRect" parent="Root"]
+modulate = Color(1, 1, 1, 0)
+material = SubResource("ShaderMaterial_ripple")
+layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="ScreenFX" type="ColorRect" parent="Root"]
+modulate = Color(1, 1, 1, 0)
+material = SubResource("ShaderMaterial_fx")
+layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="Center" type="Node2D" parent="Root"]
+position = Vector2(360, 640)
+
+[node name="Hole" type="Sprite2D" parent="Root/Center"]
+scale = Vector2(0.9, 0.9)
+texture = ExtResource("3_bh_tex")
+
+[node name="GatherParticles" type="GPUParticles2D" parent="Root/Center"]
+emitting = false
+amount = 180
+lifetime = 0.7
+process_material = SubResource("ParticleProcessMaterial_gather")
+
+[node name="BurstParticles" type="GPUParticles2D" parent="Root/Center"]
+emitting = false
+amount = 260
+lifetime = 0.55
+one_shot = true
+process_material = SubResource("ParticleProcessMaterial_burst")
+
+[node name="WhiteFlash" type="ColorRect" parent="Root"]
+layout_mode = 0
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(1, 1, 1, 0)
+
+[node name="Info" type="Label" parent="Root"]
+layout_mode = 0
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -340.0
+offset_top = 26.0
+offset_right = 340.0
+offset_bottom = 70.0
+theme_override_font_sizes/font_size = 20
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="RevealPanel" type="PanelContainer" parent="Root"]
+visible = false
+layout_mode = 0
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -280.0
+offset_top = -210.0
+offset_right = 280.0
+offset_bottom = 240.0
+
+[node name="Margin" type="MarginContainer" parent="Root/RevealPanel"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 14
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 14
+
+[node name="VBox" type="VBoxContainer" parent="Root/RevealPanel/Margin"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="ResultTexture" type="TextureRect" parent="Root/RevealPanel/Margin/VBox"]
+custom_minimum_size = Vector2(220, 220)
+layout_mode = 2
+expand_mode = 1
+stretch_mode = 5
+
+[node name="ResultName" type="Label" parent="Root/RevealPanel/Margin/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+horizontal_alignment = 1
+
+[node name="ResultRarity" type="Label" parent="Root/RevealPanel/Margin/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 20
+horizontal_alignment = 1
+
+[node name="ResultList" type="RichTextLabel" parent="Root/RevealPanel/Margin/VBox"]
+custom_minimum_size = Vector2(0, 160)
+layout_mode = 2
+fit_content = true
+
+[node name="Buttons" type="HBoxContainer" parent="Root"]
+layout_mode = 0
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -300.0
+offset_top = -86.0
+offset_right = 300.0
+offset_bottom = -24.0
+theme_override_constants/separation = 12
+alignment = 1
+
+[node name="Single" type="Button" parent="Root/Buttons"]
+custom_minimum_size = Vector2(160, 48)
+layout_mode = 2
+text = "單抽"
+
+[node name="Ten" type="Button" parent="Root/Buttons"]
+custom_minimum_size = Vector2(160, 48)
+layout_mode = 2
+text = "十連"
+
+[node name="Close" type="Button" parent="Root/Buttons"]
+custom_minimum_size = Vector2(160, 48)
+layout_mode = 2
+text = "關閉"

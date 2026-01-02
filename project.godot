@@ -15,6 +15,10 @@ run/main_scene="uid://dmlxku3cybh56"
 config/features=PackedStringArray("4.5", "Mobile")
 config/icon="res://icon.svg"
 
+[autoload]
+
+GachaManager="*res://Scripts/GachaManager.gd"
+
 [display]
 
 window/size/viewport_height=1280

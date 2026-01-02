@@ -276,6 +276,12 @@ custom_minimum_size = Vector2(0, 44)
 layout_mode = 2
 text = "Skins"
 
+[node name="GachaButton" type="Button" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer/MetaButtonsRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+text = "抽獎"
+
 [node name="UpgradesButton" type="Button" parent="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer/MetaButtonsRow"]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(0, 44)
@@ -379,4 +385,5 @@ volume_db = -2.0
 [connection signal="pressed" from="CanvasLayer/HUD/SettingsButton" to="." method="_on_settings_pressed"]
 [connection signal="pressed" from="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer/CampaignStartButton" to="." method="_on_start_campaign_pressed"]
 [connection signal="pressed" from="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer/StartButton" to="." method="_on_start_game_pressed"]
+[connection signal="pressed" from="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer/MetaButtonsRow/GachaButton" to="." method="_on_gacha_pressed"]
 [connection signal="pressed" from="CanvasLayer/MainMenu/CenterContainer/PanelContainer/MarginContainer/VBoxContainer/MetaButtonsRow/MenuSettingsButton" to="." method="_on_settings_pressed"]

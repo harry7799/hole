@@ -8,6 +8,7 @@ uniform vec2 center_uv = vec2(0.5, 0.5);
 uniform float distort_radius : hint_range(0.0, 1.0) = 0.0;
 uniform float distort_strength : hint_range(0.0, 0.1) = 0.0;
 uniform float distort_speed : hint_range(0.0, 2.0) = 0.0;
+uniform float distort_frequency : hint_range(0.5, 10.0) = 5.0;
 
 void fragment() {
     vec2 uv = UV;
@@ -31,7 +32,7 @@ void fragment() {
         float dist = length(diff_corrected);
 
         // Wave and falloff (kept conservative)
-        float wave = sin(max(dist, 0.0) * 5.0 - TIME * max(distort_speed, 0.0));
+        float wave = sin(max(dist, 0.0) * max(distort_frequency, 0.0) - TIME * max(distort_speed, 0.0));
         float distort_range_start = distort_radius * 0.6;
         float radius_falloff = 1.0 - smoothstep(distort_range_start, distort_radius, dist);
 

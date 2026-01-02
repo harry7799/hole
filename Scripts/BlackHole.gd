@@ -8,6 +8,17 @@ extends Area2D
 @onready var glitch_particles = $GlitchParticles  # 數據噴出粒子效果 (CPUParticles2D)
 @onready var fever_particles = get_node_or_null("GlitchParticles2") as CPUParticles2D
 
+# Skin overlay (because the black hole shader renders SCREEN_TEXTURE, Sprite TEXTURE changes alone are not visible).
+var _skin_overlay: Sprite2D = null
+var _skin_overlay_spin_deg_per_sec: float = 0.0
+var _skin_overlay_color: Color = Color(1, 1, 1, 0.0)
+var _skin_strength_mult: float = 1.0
+var _skin_aberration_mult: float = 1.0
+var _skin_fever_ring_color: Color = Color(1.0, 0.86, 0.25, 1.0)
+var _skin_visual_tint: Color = Color(1, 1, 1, 1)
+var _skin_ripple_strength_mult: float = 1.0
+var _skin_ripple_speed_mult: float = 1.0
+
 # 為了在 Main.gd 之外調整 WorldEnvironment
 var main_scene_node: Node2D 
 var black_hole_material: ShaderMaterial 
@@ -22,8 +33,69 @@ var full_screen_distort_material: ShaderMaterial = null   # 引用全螢幕 Shad
 @export var debug_force_assign_fullscreen_fallback: bool = false
 
 func apply_skin_texture(tex: Texture2D) -> void:
+	# NOTE: The BlackHole shader uses SCREEN_TEXTURE for the distortion, so Sprite TEXTURE is not used visually.
+	# We keep setting it for completeness, but the visible change comes from the overlay sprite.
 	if visuals and tex:
 		visuals.texture = tex
+	_ensure_skin_overlay()
+	if _skin_overlay and is_instance_valid(_skin_overlay):
+		_skin_overlay.texture = tex
+		_skin_overlay.visible = tex != null
+		# Default overlay style if caller only sets a texture.
+		_skin_overlay_color = Color(1, 1, 1, 0.55)
+		_skin_overlay.modulate = _skin_overlay_color
+		_skin_overlay_spin_deg_per_sec = 90.0
+
+
+func apply_skin_def(def: Dictionary) -> void:
+	# Apply a full skin definition from Main.gd: texture + effect knobs.
+	if def.is_empty():
+		return
+	var tex: Texture2D = def.get("texture") as Texture2D
+	apply_skin_texture(tex)
+	_skin_strength_mult = float(def.get("strength_mult", 1.0))
+	_skin_aberration_mult = float(def.get("aberration_mult", 1.0))
+	_skin_ripple_strength_mult = float(def.get("ripple_strength_mult", 1.0))
+	_skin_ripple_speed_mult = float(def.get("ripple_speed_mult", 1.0))
+	_skin_overlay_spin_deg_per_sec = float(def.get("overlay_spin", 0.0))
+	var vt: Variant = def.get("visual_tint", Color(1, 1, 1, 1))
+	if vt is Color:
+		_skin_visual_tint = vt as Color
+	else:
+		_skin_visual_tint = Color(1, 1, 1, 1)
+	var oc: Variant = def.get("overlay_color", Color(1, 1, 1, 1))
+	var oa: float = float(def.get("overlay_alpha", 0.0))
+	if oc is Color:
+		_skin_overlay_color = Color((oc as Color).r, (oc as Color).g, (oc as Color).b, clampf(oa, 0.0, 1.0))
+	else:
+		_skin_overlay_color = Color(1, 1, 1, clampf(oa, 0.0, 1.0))
+	if _skin_overlay and is_instance_valid(_skin_overlay):
+		_skin_overlay.modulate = _skin_overlay_color
+		_skin_overlay.visible = tex != null and _skin_overlay_color.a > 0.01
+	var frc: Variant = def.get("fever_ring_color", _skin_fever_ring_color)
+	if frc is Color:
+		_skin_fever_ring_color = frc as Color
+	# Immediately refresh shader params so the skin "feels" different.
+	_update_shader_params()
+	_update_instability_visuals()
+
+
+func _ensure_skin_overlay() -> void:
+	if _skin_overlay and is_instance_valid(_skin_overlay):
+		return
+	_skin_overlay = get_node_or_null("SkinOverlay") as Sprite2D
+	if _skin_overlay and is_instance_valid(_skin_overlay):
+		return
+	_skin_overlay = Sprite2D.new()
+	_skin_overlay.name = "SkinOverlay"
+	_skin_overlay.centered = true
+	_skin_overlay.visible = false
+	_skin_overlay.z_index = (visuals.z_index + 2) if visuals else 2
+	# Additive blend for a "skin glow" feel.
+	var mat := CanvasItemMaterial.new()
+	mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	_skin_overlay.material = mat
+	add_child(_skin_overlay)
 
 @export var distort_start_level: int = 1     # 全螢幕扭曲效果開始的等級
 @export var max_distort_radius: float = 1.0   # 扭曲效果最大擴散半徑 (1.0 = 全屏)
@@ -210,6 +282,12 @@ func _ready():
 			"scale_amount_min": fever_particles.scale_amount_min,
 			"scale_amount_max": fever_particles.scale_amount_max,
 		}
+	_ensure_skin_overlay()
+	# Apply selected skin (if Main.gd provides a def). Otherwise keep default.
+	if main_scene_node and main_scene_node.has_method("get_selected_skin_def"):
+		var def: Dictionary = main_scene_node.call("get_selected_skin_def") as Dictionary
+		if not def.is_empty():
+			apply_skin_def(def)
 	_ensure_fever_ring()
 	# 開局時若有物體一開始就在吸引範圍內，Godot 不一定會發 body_entered
 	# 這會導致「卡著不互動」；延遲一幀後主動掃描重疊物體加入追蹤清單
@@ -750,6 +828,9 @@ func _process(delta):
 				# Readability boost: make the effect clearly visible.
 				target_strength *= ripple_strength_boost
 				target_speed *= ripple_speed_boost
+				# Skin feel: different skins can have different ripple aggression.
+				target_strength *= _skin_ripple_strength_mult
+				target_speed *= _skin_ripple_speed_mult
 				if fever_active:
 					target_strength *= fever_ripple_strength_boost
 					target_speed *= fever_ripple_speed_boost
@@ -782,7 +863,13 @@ func _process(delta):
 			var pulse: float = sin(Time.get_ticks_msec() / 120.0) * 0.35 + 1.0
 			visuals.modulate = Color(1.0, 0.82, 0.22, 1.0) * clampf(pulse, 0.65, 1.35)
 		else:
-			visuals.modulate = _base_visual_modulate
+			# Apply skin tint outside Fever.
+			visuals.modulate = Color(
+				_base_visual_modulate.r * _skin_visual_tint.r,
+				_base_visual_modulate.g * _skin_visual_tint.g,
+				_base_visual_modulate.b * _skin_visual_tint.b,
+				_base_visual_modulate.a
+			)
 
 	# Fever ring (outer halo) - make the mode switch obvious.
 	if _fever_ring and is_instance_valid(_fever_ring) and visuals:
@@ -795,7 +882,15 @@ func _process(delta):
 			_fever_ring.scale = base_scale * fever_ring_scale_multiplier * pulse
 			# Alpha pulse makes it read without adding new assets.
 			var a_pulse: float = sin(Time.get_ticks_msec() / 150.0) * 0.12 + 1.0
-			_fever_ring.modulate = Color(1.0, 0.86, 0.25, fever_ring_alpha) * clampf(a_pulse, 0.75, 1.25)
+			var base_c: Color = _skin_fever_ring_color
+			_fever_ring.modulate = Color(base_c.r, base_c.g, base_c.b, fever_ring_alpha) * clampf(a_pulse, 0.75, 1.25)
+
+	# Skin overlay: rotate + keep aligned with visuals scale.
+	if _skin_overlay and is_instance_valid(_skin_overlay) and visuals:
+		_skin_overlay.position = Vector2.ZERO
+		_skin_overlay.scale = visuals.scale
+		if _skin_overlay_spin_deg_per_sec != 0.0:
+			_skin_overlay.rotation_degrees += _skin_overlay_spin_deg_per_sec * delta
 
 	# Fever hunt safety: Hourglass freezes enemy physics (no approach), so keep enemy-eat on contact
 	# by scanning near the core while Fever is active.
@@ -1309,7 +1404,7 @@ func _update_instability_visuals():
 	# Fever has its own strong visual feedback; keep shader effects consistent.
 	if fever_active:
 		if black_hole_material:
-			black_hole_material.set_shader_parameter("aberration", 0.12)
+			black_hole_material.set_shader_parameter("aberration", 0.12 * _skin_aberration_mult)
 		return
 	var stability_ratio = current_stability / max_stability
 	
@@ -1320,7 +1415,7 @@ func _update_instability_visuals():
 		if black_hole_material:
 			# 穩定度越低，色差強度越大
 			var max_aberration = 0.08
-			var current_aberration = lerp(max_aberration, 0.02, low_ratio)
+			var current_aberration = lerp(max_aberration, 0.02, low_ratio) * _skin_aberration_mult
 			black_hole_material.set_shader_parameter("aberration", current_aberration)
 			
 		# 2. 輝光閃爍 (Glow Pulse) - 讓 WorldEnvironment 的 Glow 閃爍
@@ -1334,7 +1429,7 @@ func _update_instability_visuals():
 	else:
 		# 穩定度回復時，將 Aberration 重設回預設值
 		if black_hole_material:
-			black_hole_material.set_shader_parameter("aberration", 0.02)
+			black_hole_material.set_shader_parameter("aberration", 0.02 * _skin_aberration_mult)
 		# NOTE: 重設 Glow 建議在 Main.gd 的 _on_stability_changed 裡進行。
 
 # 根據穩定度平滑調整黑洞大小 (質量蒸發/恢復)
@@ -1422,8 +1517,8 @@ func _update_shader_params():
 		# 將拉取半徑轉換為 UV 座標；避免半徑過大導致整張 Sprite 變成方塊
 		black_hole_material.set_shader_parameter("radius", _calc_shader_radius_uv(_get_current_radius()))
 		
-		# 強度隨等級提升 (讓扭曲效果更強烈，這裡將最大值設為 2.5)
-		var strength = lerp(0.2, 2.5, float(current_level) / max_level)
+		# 強度隨等級提升 + Skin 倍率（讓不同 skin 有「手感差」）
+		var strength = lerp(0.2, 2.5, float(current_level) / max_level) * _skin_strength_mult
 		black_hole_material.set_shader_parameter("strength", strength)
 			
 		var red_intensity = 0.0
