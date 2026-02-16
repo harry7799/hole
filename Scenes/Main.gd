@@ -16,6 +16,7 @@ extends Node2D
 @onready var main_menu = %MainMenu
 @onready var start_button = %StartButton
 @onready var campaign_start_button = get_node_or_null("%CampaignStartButton") as Button
+@onready var endless_button = get_node_or_null("%EndlessButton") as Button
 @onready var coins_label = get_node_or_null("%CoinsLabel") as Label
 @onready var skins_button = get_node_or_null("%SkinsButton") as Button
 @onready var gacha_button = get_node_or_null("%GachaButton") as Button
@@ -66,6 +67,8 @@ var _prev_hud_mouse_filter: int = Control.MOUSE_FILTER_STOP
 var _ripple_checkbox: CheckBox = null
 var _abandon_button: Button = null
 var _abandon_confirm_dialog: ConfirmationDialog = null
+var _settings_root_vbox: VBoxContainer = null
+var _settings_mission_container: VBoxContainer = null
 
 # ----------------------------------------------------
 # Meta Game（局外成長 / 變現點）
@@ -97,9 +100,37 @@ var upgrade_gravity_level: int = 0
 # ----------------------------------------------------
 # Game Mode（自由無盡 / 關卡制）
 # ----------------------------------------------------
-enum GameMode { INFINITE, CAMPAIGN }
+enum GameMode { INFINITE, CAMPAIGN, ENDLESS }
 var game_mode: int = GameMode.INFINITE
+var _upgrade_selection_ui: CanvasLayer = null
+var _character_select_ui: CanvasLayer = null
+var _paused_by_upgrade: bool = false
+var _pending_game_mode: int = GameMode.INFINITE
 var campaign_level_id: int = 1
+
+# Frame-level group query cache (avoids re-allocating arrays every frame)
+var _cached_groups: Dictionary = {}
+var _cache_frame: int = -1
+var _spawn_mgr: SpawnManager = null
+
+# Boss 系統
+var _boss_hp_container: PanelContainer = null
+var _boss_hp_bar: ProgressBar = null
+var _boss_hp_label: Label = null
+
+# 任務系統 UI（嵌入設定視窗）
+var _mission_items: Array[Dictionary] = []  # [{label: Label, bar: ProgressBar, id: String}]
+var _run_enemies_killed: int = 0
+var _run_shockwave_count: int = 0
+
+func _get_cached_group(group_name: String) -> Array:
+	var frame := Engine.get_frames_drawn()
+	if frame != _cache_frame:
+		_cache_frame = frame
+		_cached_groups.clear()
+	if not _cached_groups.has(group_name):
+		_cached_groups[group_name] = get_tree().get_nodes_in_group(group_name)
+	return _cached_groups[group_name]
 
 const CAMPAIGN_MAP_ID: String = "golden singularity"
 const CAMPAIGN_MAP_PATH: String = "res://Maps/Golden Singularity.png"
@@ -135,6 +166,7 @@ var _campaign_atmosphere_root: Node2D = null
 var _campaign_sand_particles: GPUParticles2D = null
 var _campaign_flow_lines: Line2D = null
 var _campaign_flow_time: float = 0.0
+var _campaign_prev_proximity: float = -1.0
 
 # Campaign readability / pacing
 @export var campaign_guidance_edge_margin_px: float = 56.0
@@ -303,10 +335,6 @@ var _bg_repeat_last_world_vp: Vector2 = Vector2.ZERO
 @export var object_scene: PackedScene = null  
 @export var enemy_scene: PackedScene = null   # 【請務必在編輯器中拖入你的敵人場景】
 
-var spawn_timer: Timer
-var enemy_spawn_timer: Timer 
-var spawn_rate: float = 1.5
-
 # 獵物生成密度
 @export var prey_base_spawn_count: int = 2
 @export var prey_max_spawn_count: int = 5
@@ -325,23 +353,14 @@ const IMPORTED_FONTDATA := preload("res://.godot/imported/NotoSansCJKtc-Regular.
 @export var hourglass_duration: float = 15.0
 @export var magnet_strength: float = 6500.0
 
-var _powerup_spawn_timer: Timer
-var _magnet_time_left: float = 0.0
-var _hourglass_time_left: float = 0.0
-var _hourglass_active: bool = false
-
-var _magnet_scene: PackedScene = preload("res://Scenes/MagnetItem.tscn")
-var _hourglass_scene: PackedScene = preload("res://Scenes/HourglassItem.tscn")
-
 # 遊戲狀態
 var is_game_over: bool = false
-var game_duration: float = 180.0 # 遊戲限時 3 分鐘
+const ENDLESS_TIME_LIMIT: float = 180.0
+const CAMPAIGN_TIME_LIMIT: float = 150.0
+var game_duration: float = ENDLESS_TIME_LIMIT
 var time_left: float = 0.0
 var wanted_level: int = 0
 var current_score: int = 0
-
-# Enemy composition: later waves include earlier wave enemies.
-var _enemy_stage_cycle: Array[int] = []
 
 # 進入場景先顯示主選單；按「開始遊戲」才正式開始
 var game_started: bool = false
@@ -365,8 +384,6 @@ var _hit_stop_seq: int = 0
 # -----------------------------
 @export var enable_projectile_pooling: bool = true
 @export var projectile_pool_prewarm: int = 40
-var _projectile_pool_root: Node2D = null
-var _projectile_pools: Dictionary = {} # key: PackedScene.resource_path -> Array[Area2D]
 
 # -----------------------------
 # Meta：試用體驗 / 離線收益
@@ -394,6 +411,16 @@ var _idle_rewards_claim_button: Button = null
 
 var _fever_combo_count: int = 0
 var _fever_combo_last_sec: float = -9999.0
+
+# -----------------------------
+# Swallow Combo（連吞得分倍率）
+# -----------------------------
+const COMBO_WINDOW: float = 1.5  # seconds between swallows to maintain combo
+const COMBO_MULTIPLIERS: Array[float] = [1.0, 1.0, 1.5, 2.0, 3.0, 5.0]  # index = combo level (0-5)
+var _combo_count: int = 0
+var _combo_timer: float = 0.0
+var _combo_label: Label = null
+var _combo_tween: Tween = null
 
 # -----------------------------
 # 背景動態磁磚池/Parallax 支援函式
@@ -591,7 +618,6 @@ func _ready():
 	current_score = 0
 	_load_meta()
 	_apply_sfx_volume_db(sfx_volume_db)
-	_setup_pools()
 	_grant_idle_rewards_if_any()
 
 	_setup_emp_reward_dialog()
@@ -620,39 +646,13 @@ func _ready():
 	else:
 		_init_background()
 
-	# Ensure any fullscreen ColorRect diagnostic overlays are hidden immediately on scene start
-	# (this removes the red diagnostic mask that appears on the menu)
-	var _debug_startup_overlay_sanitize := false
-	if _debug_startup_overlay_sanitize:
-		call_deferred("_hide_fullscreen_colorrects", get_tree().root)
-		# Conservative safety: ensure main UI and background are visible after setup
-		call_deferred("_force_ui_visible")
 	# If a game isn't running yet, ensure the main menu is entered/shown
 	if not game_started:
 		call_deferred("_enter_main_menu")
-	# Dump startup visibility for diagnosis
-	if _debug_startup_overlay_sanitize:
-		call_deferred("_dump_startup_visibility")
-	# Aggressively clear any large opaque overlays that may still occlude the menu
-	if _debug_startup_overlay_sanitize:
-		call_deferred("_clear_large_overlays")
-	# Also perform targeted hides for known overlay nodes right after
-	if _debug_startup_overlay_sanitize:
-		call_deferred("_explicit_hide_known_overlays", get_tree().root)
-	# Dump diagnostic info about root children and overlays (helps find stubborn masks)
-	if _debug_startup_overlay_sanitize:
-		call_deferred("_dump_root_overlay_info", get_tree().root)
-	# Aggressively clear red/fullscreen overlays (run twice to catch early/late creations)
-	if _debug_startup_overlay_sanitize:
-		call_deferred("_aggressive_clear_overlays", get_tree().root)
-		call_deferred("_aggressive_clear_overlays", get_tree().root)
-	# Also print a full scene tree dump (deferred) so we can locate persistent overlays
-	if _debug_startup_overlay_sanitize:
-		call_deferred("_force_dump_scene_tree", get_tree().root)
-		call_deferred("_force_dump_scene_tree", get_tree().root)
 	_init_ui()
 	_connect_signals()
 	_ensure_enemy_combo_ui()
+	_ensure_combo_ui()
 	# 保險：避免按鈕被 UI 擋住或被設為忽略滑鼠
 	if emp_button and emp_button is Control:
 		emp_button.disabled = false
@@ -663,9 +663,11 @@ func _ready():
 	if score_label and score_label is Control:
 		score_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
-	_setup_spawning()
-	_setup_enemy_spawning()
-	_setup_powerup_spawning()
+	# SpawnManager: owns timers, pools, spawn logic
+	_spawn_mgr = SpawnManager.new()
+	_spawn_mgr.name = "SpawnManager"
+	add_child(_spawn_mgr)
+	_spawn_mgr.setup(self, camera, %BlackHole, object_scene, enemy_scene, enable_projectile_pooling, projectile_pool_prewarm)
 
 	# 主選單：一進入先停在選單
 	_enter_main_menu()
@@ -709,32 +711,6 @@ func _ensure_project_font_applied() -> void:
 		_force_apply_theme_fallback()
 
 
-func _setup_pools() -> void:
-	if _projectile_pool_root and is_instance_valid(_projectile_pool_root):
-		return
-	_projectile_pool_root = Node2D.new()
-	_projectile_pool_root.name = "PoolRoot"
-	add_child(_projectile_pool_root)
-
-	if not enable_projectile_pooling:
-		return
-	# 預熱：避免開局第一波射擊卡頓
-	if projectile_pool_prewarm <= 0:
-		return
-	var scene = null
-	# 嘗試從 enemy_scene 取投射物 PackedScene（若拿不到就不預熱）
-	if enemy_scene:
-		var tmp = enemy_scene.instantiate()
-		if tmp and tmp.has_method("get"):
-			scene = tmp.get("projectile_scene")
-		if is_instance_valid(tmp):
-			tmp.queue_free()
-	if scene and scene is PackedScene:
-		for i in range(projectile_pool_prewarm):
-			var p = (scene as PackedScene).instantiate()
-			if p is Area2D:
-				_projectile_pool_root.add_child(p)
-				recycle_enemy_projectile(p as Area2D)
 
 
 func _on_tree_node_added(node: Node) -> void:
@@ -877,106 +853,13 @@ func _locate_imported_fontdata() -> Font:
 
 
 func spawn_enemy_projectile(projectile_scene: PackedScene, pos: Vector2, vel: Vector2, spd: float, dmg: float, tex: Texture2D) -> void:
-	if not projectile_scene:
-		return
-	if not enable_projectile_pooling:
-		# fallback：原本 instantiate/free
-		var projectile = projectile_scene.instantiate()
-		add_child(projectile)
-		if projectile.has_method("setup_for_spawn"):
-			projectile.call("setup_for_spawn", pos, vel, spd, dmg, tex)
-		else:
-			projectile.global_position = pos
-			projectile.velocity = vel
-			projectile.speed = spd
-			projectile.damage = dmg
-		return
-
-	var key: String = projectile_scene.resource_path
-	var pool: Array = _projectile_pools.get(key, []) as Array
-	var p: Area2D = null
-	if pool.size() > 0:
-		while pool.size() > 0 and (p == null or not is_instance_valid(p)):
-			var candidate = pool.pop_back()
-			if candidate == null:
-				continue
-			# 避免「Trying to cast a freed object」：先檢查 validity，再判斷型別
-			if not is_instance_valid(candidate):
-				continue
-			if candidate is Area2D:
-				p = candidate as Area2D
-		_projectile_pools[key] = pool
-	else:
-		var inst = projectile_scene.instantiate()
-		if inst is Area2D:
-			p = inst as Area2D
-			add_child(p)
-			# 把 scene key 存在 meta 供回收使用
-			p.set_meta("pool_key", key)
-		else:
-			return
-
-	if not p or not is_instance_valid(p):
-		return
-	# 重新掛回主場景（避免留在 PoolRoot）
-	if p.get_parent() != self:
-		p.get_parent().remove_child(p)
-		add_child(p)
-	# Pool 回收時會把它移出 group，這裡確保 active projectile 會被計數
-	if not p.is_in_group("EnemyProjectiles"):
-		p.add_to_group("EnemyProjectiles")
-	if p.has_method("setup_for_spawn"):
-		p.call("setup_for_spawn", pos, vel, spd, dmg, tex)
-	else:
-		p.global_position = pos
-		p.velocity = vel
-		p.speed = spd
-		p.damage = dmg
-		p.visible = true
-		p.set_physics_process(true)
-		p.set_process(true)
-		p.monitoring = true
-		p.monitorable = true
+	if _spawn_mgr:
+		_spawn_mgr.spawn_enemy_projectile(projectile_scene, pos, vel, spd, dmg, tex)
 
 
 func recycle_enemy_projectile(p: Area2D) -> void:
-	if not p or not is_instance_valid(p):
-		return
-	if not enable_projectile_pooling:
-		p.queue_free()
-		return
-	var key: String = ""
-	if p.has_meta("pool_key"):
-		key = String(p.get_meta("pool_key"))
-	if key == "":
-		key = "__default"
-	var pool: Array = _projectile_pools.get(key, []) as Array
-	# 停止互動（注意：此函式可能從 body_entered/area_entered 等 physics callback 觸發）
-	# 這些狀態更動必須用 deferred，避免 "Function blocked during in/out signal"。
-	# 【關鍵修正】回收後移出 group，避免 get_nodes_in_group("EnemyProjectiles") 永遠算到池內的子彈
-	if p.is_in_group("EnemyProjectiles"):
-		p.remove_from_group("EnemyProjectiles")
-	p.visible = false
-	p.set_physics_process(false)
-	p.set_process(false)
-	p.set_deferred("monitoring", false)
-	p.set_deferred("monitorable", false)
-	# 移到 PoolRoot（同樣用 deferred，避免在 physics callback 直接 reparent）
-	if _projectile_pool_root and is_instance_valid(_projectile_pool_root) and p.get_parent() != _projectile_pool_root:
-		call_deferred("_reparent_projectile_to_pool", p)
-	pool.append(p)
-	_projectile_pools[key] = pool
-
-
-func _reparent_projectile_to_pool(p: Area2D) -> void:
-	if not p or not is_instance_valid(p):
-		return
-	if not _projectile_pool_root or not is_instance_valid(_projectile_pool_root):
-		return
-	var parent := p.get_parent()
-	if parent and is_instance_valid(parent) and parent != _projectile_pool_root:
-		parent.remove_child(p)
-		_projectile_pool_root.add_child(p)
+	if _spawn_mgr:
+		_spawn_mgr.recycle_enemy_projectile(p)
 
 
 func _grant_idle_rewards_if_any() -> void:
@@ -989,7 +872,8 @@ func _grant_idle_rewards_if_any() -> void:
 	var now: int = int(Time.get_unix_time_from_system())
 	if last_seen <= 0 or now <= last_seen:
 		return
-	var minutes: int = int((now - last_seen) / 60)
+	@warning_ignore("integer_division")
+	var minutes: int = (now - last_seen) / 60
 	minutes = clampi(minutes, 0, idle_coin_cap_minutes)
 	if minutes <= 0:
 		return
@@ -1016,6 +900,7 @@ func _setup_music() -> void:
 	_music_player = AudioStreamPlayer.new()
 	_music_player.volume_db = battle_music_volume_db
 	_music_player.autoplay = false
+	_music_player.process_mode = Node.PROCESS_MODE_ALWAYS
 	# Auto-loop: replay when the stream finishes.
 	if not _music_player.finished.is_connected(_on_music_finished):
 		_music_player.finished.connect(_on_music_finished)
@@ -1087,8 +972,8 @@ func _setup_settings_menu() -> void:
 	_settings_dialog.process_mode = Node.PROCESS_MODE_ALWAYS
 	# 視窗質感：固定較大尺寸 + 不可調整大小
 	_settings_dialog.unresizable = true
-	_settings_dialog.min_size = Vector2i(620, 360)
-	_settings_dialog.size = Vector2i(620, 360)
+	_settings_dialog.min_size = Vector2i(620, 520)
+	_settings_dialog.size = Vector2i(620, 520)
 	_settings_dialog.ok_button_text = "關閉"
 	# Put the dialog on a dedicated CanvasLayer so it can't be covered by overlays.
 	_settings_layer.add_child(_settings_dialog)
@@ -1109,6 +994,7 @@ func _setup_settings_menu() -> void:
 	root.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	root.add_theme_constant_override("separation", 14)
 	margin.add_child(root)
+	_settings_root_vbox = root
 
 	var title := Label.new()
 	title.text = "音樂音量"
@@ -1220,6 +1106,19 @@ func _setup_settings_menu() -> void:
 	root.add_child(abandon_btn)
 	abandon_btn.pressed.connect(_on_abandon_pressed)
 
+	# ── 每日任務區塊 ──
+	var mission_sep := HSeparator.new()
+	root.add_child(mission_sep)
+	var mission_title := Label.new()
+	mission_title.text = "📋 每日任務"
+	mission_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	mission_title.add_theme_font_size_override("font_size", 22)
+	mission_title.add_theme_color_override("font_color", Color(1.0, 0.9, 0.4))
+	root.add_child(mission_title)
+	_settings_mission_container = VBoxContainer.new()
+	_settings_mission_container.add_theme_constant_override("separation", 4)
+	root.add_child(_settings_mission_container)
+
 	var btn = settings_button
 	if not btn:
 		btn = find_child("SettingsButton", true, false)
@@ -1264,13 +1163,13 @@ func _setup_idle_rewards_dialog() -> void:
 	if _idle_rewards_dialog:
 		return
 	_idle_rewards_dialog = AcceptDialog.new()
-	_idle_rewards_dialog.title = "離線收益"
+	_idle_rewards_dialog.title = "⭐ 銀河銀行 ⭐"
 	_idle_rewards_dialog.dialog_text = ""
 	_idle_rewards_dialog.unresizable = true
-	_idle_rewards_dialog.min_size = Vector2i(640, 300)
-	_idle_rewards_dialog.size = Vector2i(640, 300)
+	_idle_rewards_dialog.min_size = Vector2i(640, 320)
+	_idle_rewards_dialog.size = Vector2i(640, 320)
 	_idle_rewards_dialog.ok_button_text = "關閉"
-	_idle_rewards_claim_button = _idle_rewards_dialog.add_button("領取", false, "CLAIM") as Button
+	_idle_rewards_claim_button = _idle_rewards_dialog.add_button("✨ 領取 ✨", false, "CLAIM") as Button
 	add_child(_idle_rewards_dialog)
 	if not _idle_rewards_dialog.custom_action.is_connected(_on_idle_rewards_dialog_action):
 		_idle_rewards_dialog.custom_action.connect(_on_idle_rewards_dialog_action)
@@ -1288,10 +1187,10 @@ func _update_idle_rewards_dialog_text() -> void:
 		return
 	var pending: int = maxi(0, _pending_idle_reward_coins)
 	var cap: int = maxi(0, idle_coin_daily_cap)
-	var cap_note := "每日離線收益上限：%d" % cap
-	var pending_note := "目前可領取：%d 金幣" % pending
-	var hint := "（達到上限後不再累積，鼓勵每天回來領取）"
-	_idle_rewards_dialog.dialog_text = "%s\n%s\n%s" % [pending_note, cap_note, hint]
+	var cap_note := "📦 每日離線收益上限：%d" % cap
+	var pending_note := "💰 目前可領取：%d 金幣" % pending
+	var hint := "（每天回來領取，讓黑洞持續進化！）"
+	_idle_rewards_dialog.dialog_text = "\n%s\n\n%s\n\n%s" % [pending_note, cap_note, hint]
 	if _idle_rewards_claim_button and is_instance_valid(_idle_rewards_claim_button):
 		_idle_rewards_claim_button.disabled = (pending <= 0)
 
@@ -1308,11 +1207,86 @@ func _on_idle_rewards_dialog_action(action: StringName) -> void:
 	_pending_idle_reward_coins = 0
 	_save_meta()
 	_update_meta_ui()
+	# 金幣飛入動畫
+	_play_coin_fly_animation(mini(pending, 10))
 	_show_toast("已領取離線收益 +%d 金幣" % pending, Color(0.2, 1, 1))
 	_update_idle_rewards_dialog_text()
 
 
+func _play_coin_fly_animation(count: int) -> void:
+	# 產生金幣飛向畫面中心的粒子動畫
+	var vp_size := get_viewport().get_visible_rect().size
+	var target_pos := Vector2(vp_size.x * 0.5, vp_size.y * 0.12)  # 金幣 UI 位置
+	for i in range(count):
+		var coin_label := Label.new()
+		coin_label.text = "⭐"
+		coin_label.add_theme_font_size_override("font_size", 36)
+		coin_label.z_index = 200
+		# 從螢幕隨機位置出發
+		var start_x := randf_range(vp_size.x * 0.2, vp_size.x * 0.8)
+		var start_y := randf_range(vp_size.y * 0.4, vp_size.y * 0.7)
+		coin_label.position = Vector2(start_x, start_y)
+		coin_label.modulate = Color(1.0, 0.85, 0.2, 1.0)
+		coin_label.scale = Vector2(1.5, 1.5)
+		add_child(coin_label)
+		var tw := create_tween()
+		tw.set_parallel(true)
+		var delay := i * 0.07
+		tw.tween_property(coin_label, "position", target_pos, 0.55 + delay).set_delay(delay).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_QUAD)
+		tw.tween_property(coin_label, "scale", Vector2(0.3, 0.3), 0.55 + delay).set_delay(delay).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_QUAD)
+		tw.tween_property(coin_label, "modulate:a", 0.0, 0.15).set_delay(0.45 + delay)
+		tw.chain().tween_callback(coin_label.queue_free)
+
+
 func _load_meta() -> void:
+	# Delegate to MetaManager autoload, then sync local vars
+	if has_node("/root/MetaManager"):
+		var mm = get_node("/root/MetaManager")
+		mm.load_meta()
+		_sync_from_meta_manager()
+	else:
+		_load_meta_legacy()
+
+func _sync_from_meta_manager() -> void:
+	var mm = get_node("/root/MetaManager")
+	meta_coins = mm.coins
+	_pending_idle_reward_coins = mm.pending_idle_reward_coins
+	meta_selected_skin = mm.selected_skin
+	meta_unlocked_skins = mm.unlocked_skins
+	meta_selected_map = mm.selected_map
+	meta_selected_menu_map = mm.selected_menu_map
+	meta_unlocked_maps = mm.unlocked_maps
+	upgrade_gravity_level = mm.upgrade_gravity_level
+	upgrade_speed_level = mm.upgrade_speed_level
+	upgrade_magnet_level = mm.upgrade_magnet_level
+	enable_dynamic_bgm_pitch = mm.dynamic_bgm_pitch
+	meta_selected_bgm_id = mm.selected_bgm_id
+	battle_music_volume_db = mm.music_volume_db
+	sfx_volume_db = mm.sfx_volume_db
+	meta_campaign_cleared = mm.campaign_cleared
+	meta_campaign_max_unlocked = mm.campaign_max_unlocked
+	_apply_meta_to_session()
+
+func _sync_to_meta_manager() -> void:
+	var mm = get_node("/root/MetaManager")
+	mm.coins = meta_coins
+	mm.pending_idle_reward_coins = _pending_idle_reward_coins
+	mm.selected_skin = meta_selected_skin
+	mm.unlocked_skins = meta_unlocked_skins
+	mm.selected_map = meta_selected_map
+	mm.selected_menu_map = meta_selected_menu_map
+	mm.unlocked_maps = meta_unlocked_maps
+	mm.upgrade_gravity_level = upgrade_gravity_level
+	mm.upgrade_speed_level = upgrade_speed_level
+	mm.upgrade_magnet_level = upgrade_magnet_level
+	mm.dynamic_bgm_pitch = enable_dynamic_bgm_pitch
+	mm.selected_bgm_id = meta_selected_bgm_id
+	mm.music_volume_db = battle_music_volume_db
+	mm.sfx_volume_db = sfx_volume_db
+	mm.campaign_cleared = meta_campaign_cleared
+	mm.campaign_max_unlocked = meta_campaign_max_unlocked
+
+func _load_meta_legacy() -> void:
 	var cfg := ConfigFile.new()
 	var err := cfg.load(_get_meta_save_path())
 	if err == OK:
@@ -1383,6 +1357,13 @@ func _load_meta() -> void:
 
 
 func _save_meta() -> void:
+	# Sync local vars to MetaManager, then delegate save
+	if has_node("/root/MetaManager"):
+		_sync_to_meta_manager()
+		var mm = get_node("/root/MetaManager")
+		mm.save_meta()
+		return
+	# Legacy fallback
 	var cfg := ConfigFile.new()
 	cfg.set_value("meta", "coins", meta_coins)
 	cfg.set_value("meta", "pending_idle_reward_coins", _pending_idle_reward_coins)
@@ -1395,7 +1376,6 @@ func _save_meta() -> void:
 	cfg.set_value("upgrades", "gravity", upgrade_gravity_level)
 	cfg.set_value("upgrades", "speed", upgrade_speed_level)
 	cfg.set_value("upgrades", "magnet", upgrade_magnet_level)
-	# Persist UI/settings
 	cfg.set_value("settings", "dynamic_bgm_pitch", enable_dynamic_bgm_pitch)
 	cfg.set_value("settings", "bgm_id", meta_selected_bgm_id)
 	cfg.set_value("settings", "music_volume_db", battle_music_volume_db)
@@ -1871,10 +1851,14 @@ func _apply_upgrades_to_runtime() -> void:
 		if black_hole.has_method("reset_for_new_run") and game_started == false:
 			black_hole.reset_for_new_run()
 
-	# 2) 移動速度
+	# 2) 移動速度 (combine meta upgrade + roguelike modifiers)
 	var pc = get_node_or_null("PlayerController")
 	if pc and pc.has_method("apply_speed_multiplier"):
 		var speed_mult := 1.0 + float(upgrade_speed_level) * 0.08
+		# Layer roguelike speed modifier on top of meta upgrade
+		var rum_speed = get_node_or_null("/root/RoguelikeUpgradeManager")
+		if rum_speed and rum_speed.has_method("get_multiplier"):
+			speed_mult *= rum_speed.get_multiplier("move_speed_mult")
 		pc.apply_speed_multiplier(speed_mult)
 
 	# 3) 磁鐵持續時間
@@ -2552,9 +2536,10 @@ func _on_settings_pressed() -> void:
 		return
 	_refresh_music_by_state()
 	_refresh_bgm_options()
+	_rebuild_settings_missions()
 	_apply_settings_modal(true)
 	# Use a safe popup path; modal is handled via `exclusive = true`.
-	_settings_dialog.popup_centered(Vector2i(620, 360))
+	_settings_dialog.popup_centered(Vector2i(620, 520))
 	_settings_dialog.grab_focus()
 	# Pause gameplay while settings is open (in-game only).
 	if game_started and not is_game_over:
@@ -2744,6 +2729,12 @@ func _input(event):
 				_on_start_game_pressed()
 				get_viewport().set_input_as_handled()
 				return
+		if endless_button and endless_button is Control and endless_button.visible:
+			var endless_rect: Rect2 = (endless_button as Control).get_global_rect()
+			if endless_rect.has_point(pos):
+				_on_start_endless_pressed()
+				get_viewport().set_input_as_handled()
+				return
 
 		# 主選單：離線收益
 		var idle_btn: Button = idle_rewards_button
@@ -2830,6 +2821,8 @@ func _connect_signals():
 			black_hole.objective_swallowed.connect(_on_campaign_objective_swallowed)
 		if black_hole.has_signal("powerup_collected"):
 			black_hole.powerup_collected.connect(_on_powerup_collected)
+		if black_hole.has_signal("enemy_killed"):
+			black_hole.enemy_killed.connect(_on_enemy_killed)
 		
 		if black_hole.has_signal("stability_changed"):
 			black_hole.stability_changed.connect(_on_stability_changed)
@@ -2861,6 +2854,13 @@ func _connect_signals():
 	if campaign_start_button and campaign_start_button is Button:
 		if not (campaign_start_button as Button).pressed.is_connected(_on_start_campaign_pressed):
 			(campaign_start_button as Button).pressed.connect(_on_start_campaign_pressed)
+	if endless_button and endless_button is Button:
+		if not (endless_button as Button).pressed.is_connected(_on_start_endless_pressed):
+			(endless_button as Button).pressed.connect(_on_start_endless_pressed)
+
+	# Roguelike: auto_shockwave event from powerup_collected signal
+	if not Events.powerup_collected.is_connected(_on_roguelike_auto_shockwave):
+		Events.powerup_collected.connect(_on_roguelike_auto_shockwave)
 
 	# 音樂變速開關
 	if music_pitch_toggle and music_pitch_toggle is CheckBox:
@@ -2907,12 +2907,8 @@ func _enter_main_menu() -> void:
 		print("_enter_main_menu: main_menu shown; z_index=", (main_menu.z_index if main_menu is CanvasItem else "N/A"))
 
 	# 停止生成與玩家控制/黑洞處理
-	if spawn_timer:
-		spawn_timer.stop()
-	if enemy_spawn_timer:
-		enemy_spawn_timer.stop()
-	if _powerup_spawn_timer:
-		_powerup_spawn_timer.stop()
+	if _spawn_mgr:
+		_spawn_mgr.stop_timers()
 
 	var player_controller = get_node_or_null("PlayerController")
 	if player_controller:
@@ -2929,9 +2925,13 @@ func _enter_main_menu() -> void:
 	time_left = game_duration
 	current_score = 0
 	wanted_level = 0
-	_magnet_time_left = 0.0
-	_hourglass_time_left = 0.0
-	_hourglass_active = false
+	_combo_count = 0
+	_combo_timer = 0.0
+	if _spawn_mgr:
+		_spawn_mgr.reset_powerup_state()
+	if %BlackHole and %BlackHole.has_method("set_shield_active"):
+		%BlackHole.set_shield_active(false)
+	_hide_boss_hp_bar()
 	_init_ui()
 	_update_time_ui()
 	_update_wanted_ui()
@@ -2951,8 +2951,38 @@ func _enter_main_menu() -> void:
 
 
 func _on_start_game_pressed() -> void:
-	game_mode = GameMode.INFINITE
+	_pending_game_mode = GameMode.INFINITE
+	_show_character_select()
+
+func _on_start_endless_pressed() -> void:
+	_pending_game_mode = GameMode.ENDLESS
+	_show_character_select()
+
+func _show_character_select() -> void:
+	if _character_select_ui and is_instance_valid(_character_select_ui):
+		_character_select_ui.queue_free()
+	var CharSelectScript: GDScript = load("res://Scripts/CharacterSelectUI.gd") as GDScript
+	if not CharSelectScript:
+		# Fallback: skip character select, use default
+		game_mode = _pending_game_mode
+		_start_game()
+		return
+	# Hide main menu so it doesn't bleed through
+	if main_menu:
+		main_menu.hide()
+	_character_select_ui = CharSelectScript.new() as CanvasLayer
+	add_child(_character_select_ui)
+	_character_select_ui.character_chosen.connect(_on_character_chosen)
+	_character_select_ui.cancelled.connect(_on_character_select_cancelled)
+
+func _on_character_chosen(character_id: String) -> void:
+	game_mode = _pending_game_mode
 	_start_game()
+
+func _on_character_select_cancelled() -> void:
+	# Restore main menu visibility
+	if main_menu:
+		main_menu.show()
 
 
 func _on_start_campaign_pressed() -> void:
@@ -2969,6 +2999,10 @@ func _start_game() -> void:
 		get_tree().paused = false
 	_paused_by_settings = false
 
+	# Reset roguelike manager for new run
+	if has_node("/root/RoguelikeUpgradeManager"):
+		get_node("/root/RoguelikeUpgradeManager").reset_run()
+
 	game_started = true
 	is_game_over = false
 	_revive_prompt_open = false
@@ -2983,13 +3017,32 @@ func _start_game() -> void:
 	if shockwave_button:
 		shockwave_button.show()
 
+	# Endless mode: no time limit (use a very large number)
+	if game_mode == GameMode.ENDLESS:
+		game_duration = 999999.0
+	else:
+		game_duration = ENDLESS_TIME_LIMIT
+
 	# 初始化本局數值
 	time_left = game_duration
 	current_score = 0
 	wanted_level = 0
-	_magnet_time_left = 0.0
-	_hourglass_time_left = 0.0
-	_hourglass_active = false
+	_combo_count = 0
+	_combo_timer = 0.0
+	if _combo_label and is_instance_valid(_combo_label):
+		_combo_label.visible = false
+	if _spawn_mgr:
+		_spawn_mgr.reset_powerup_state()
+	if %BlackHole and %BlackHole.has_method("set_shield_active"):
+		%BlackHole.set_shield_active(false)
+	_hide_boss_hp_bar()
+	_run_enemies_killed = 0
+	_run_shockwave_count = 0
+	# 每局開始生成新的局內任務
+	if has_node("/root/MissionManager"):
+		var msm: Node = get_node("/root/MissionManager")
+		msm.generate_run_missions()
+		msm.reset_run_progress()
 	_revive_used = false
 	_run_score_claimed = false
 	_apply_meta_to_session()
@@ -2999,7 +3052,6 @@ func _start_game() -> void:
 	_init_ui()
 	_update_time_ui()
 	_update_wanted_ui()
-
 	# 啟用玩家控制/黑洞處理
 	var player_controller = get_node_or_null("PlayerController")
 	if player_controller:
@@ -3011,27 +3063,14 @@ func _start_game() -> void:
 			black_hole.reset_for_new_run()
 		black_hole.set_process(true)
 		black_hole.set_physics_process(true)
-		# Normal startup: do not force-debug visuals or reposition the black hole.
-		# Previously we ran intrusive diagnostics here (ensure_visuals_visible, forced reposition,
-		# get_render_debug_info, and hiding fullscreen ColorRects). Those calls can inadvertently
-		# modify scene nodes and occlude rendering; keep startup quiet for release runs.
 		if black_hole.has_method("set_fullscreen_distort_enabled"):
 			black_hole.set_fullscreen_distort_enabled(gravity_ripple_enabled)
 
 	# 啟動生成
-	if spawn_timer:
-		spawn_timer.start()
-	if enemy_spawn_timer:
-		enemy_spawn_timer.start()
-	if _powerup_spawn_timer:
-		_powerup_spawn_timer.start()
+	if _spawn_mgr:
+		_spawn_mgr.start_timers()
 	_refresh_music_by_state()
 
-	# Disabled global fullscreen debug test by default (commented out to avoid red mask)
-	# If you need to re-enable for debugging, set the flag below to true.
-	const DEBUG_ENABLE_GLOBAL_FULLSCREEN_TEST_MAIN: bool = false
-	if not OS.has_feature("javascript") and DEBUG_ENABLE_GLOBAL_FULLSCREEN_TEST_MAIN:
-		call_deferred("_create_global_fullscreen_test_main")
 
 
 func _start_campaign_if_needed() -> void:
@@ -3043,7 +3082,7 @@ func _start_campaign_if_needed() -> void:
 	_campaign_reached_lv7 = false
 	_campaign_vortex_enabled = false
 	_bind_campaign_map_and_music()
-	time_left = 150.0
+	time_left = CAMPAIGN_TIME_LIMIT
 	_update_time_ui()
 	_show_toast("關卡目標：\n達到 Lv.7 觸發目標\nLv.10 吞噬黃金核心", Color(1.0, 0.92, 0.35))
 
@@ -3067,440 +3106,6 @@ func _bind_campaign_map_and_music() -> void:
 		_campaign_forced_music_stream = load(music_path) as AudioStream
 	# Ensure music updates to the forced campaign track.
 	_refresh_music_by_state()
-
-
-func _hide_fullscreen_colorrects(node: Node) -> void:
-	if not node:
-		return
-	var vp = get_viewport()
-	var vp_size: Vector2 = Vector2.ZERO
-	if vp:
-		# Prefer visible_rect but fall back to viewport.size
-		vp_size = vp.get_visible_rect().size
-		if vp_size == Vector2.ZERO:
-			vp_size = vp.size
-	# If viewport size remains zero, we skip the size-matching fallback.
-	# (Avoid calling Engine/DisplayServer methods that may not exist in all builds.)
-	# Conservative name patterns to catch "Dim"/"Mask" nodes too
-	var name_patterns = ["fullscreen", "overlay", "debug", "dim", "mask", "shade", "backdrop", "screen"]
-	for c in node.get_children():
-		# Handle ColorRect and TextureRect specially (do NOT treat all Control nodes as overlays)
-		if c is ColorRect or c is TextureRect:
-			var cr_node := c
-			var name_l = cr_node.name.to_lower()
-			var is_full_name = false
-			for p in name_patterns:
-				if name_l.find(p) != -1:
-					is_full_name = true
-					break
-			var size_match = false
-			if vp_size != Vector2.ZERO:
-				# For Control-derived nodes, use rect size/get_size
-				var rs = Vector2.ZERO
-				if cr_node is ColorRect:
-					rs = (cr_node as ColorRect).get_size()
-				elif cr_node is Control:
-					rs = (cr_node as Control).get_size()
-				else:
-					rs = Vector2.ZERO
-				if rs != Vector2.ZERO and rs.distance_to(vp_size) < max(vp_size.x, vp_size.y) * 0.25:
-					size_match = true
-			# If name or size indicate a fullscreen overlay, hide and remove any material
-			if is_full_name or size_match:
-				if cr_node is CanvasItem:
-					cr_node.visible = false
-					# Remove any shader/material that could tint the screen
-					if cr_node is ColorRect:
-						(cr_node as ColorRect).modulate.a = 0.0
-					if cr_node.has_method("set_material"):
-						cr_node.set_material(null)
-		else:
-			_hide_fullscreen_colorrects(c)
-
-
-func _explicit_hide_known_overlays(root: Node) -> void:
-	# Explicitly hide commonly used fullscreen overlay nodes by name/path
-	if not root:
-		return
-	# Hide any ColorRect named "Dim" (main menu dimmer)
-	var _dims = root.get_nodes_in_group("__dim_finder__") if false else [] # placeholder to avoid group usage
-	# fallback: brute-force search for nodes named "Dim"
-	for n in root.get_children():
-		if n.name == "Dim" and n is ColorRect:
-			(n as ColorRect).visible = false
-			(n as ColorRect).modulate.a = 0.0
-		# search deeper
-		for sub in n.get_children():
-			if sub.name == "Dim" and sub is ColorRect:
-				(sub as ColorRect).visible = false
-				(sub as ColorRect).modulate.a = 0.0
-	# Hide the project FullScreenEffect unique node if present
-	var fse = get_node_or_null("%FullScreenEffect")
-	if fse and is_instance_valid(fse):
-		# try to find a ColorRect child and disable it
-		for child in fse.get_children():
-			if child is ColorRect:
-				(child as ColorRect).visible = false
-				(child as ColorRect).modulate.a = 0.0
-				if child.has_method("set_material"):
-					child.set_material(null)
-	# Also hide any node we explicitly created for global fullscreen test
-	var test_node = get_node_or_null("/root/GlobalFullscreenTest")
-	if test_node and is_instance_valid(test_node):
-		if test_node is CanvasLayer or test_node is Node2D or test_node is Control:
-			test_node.queue_free()
-	# Also remove any BlackHole-created global test layers (names used in diagnostic helpers)
-	var _bh_test = get_tree().root.get_node_or_null("BlackHoleGlobalTestRoot")
-
-
-func _force_ui_visible() -> void:
-	# Ensure HUD and MainMenu are visible and on reasonable CanvasLayer/z_index
-	if hud and is_instance_valid(hud):
-		hud.visible = true
-		var ph = hud.get_parent()
-		if ph and ph is CanvasLayer:
-			ph.layer = max(ph.layer, 0)
-		if hud is CanvasItem:
-			hud.z_index = clamp(hud.z_index, -1000, 1000)
-
-	if main_menu and is_instance_valid(main_menu):
-		main_menu.visible = true
-		var pm = main_menu.get_parent()
-		if pm and pm is CanvasLayer:
-			pm.layer = max(pm.layer, 0)
-		if main_menu is CanvasItem:
-			main_menu.z_index = clamp(main_menu.z_index, -1000, 1000)
-
-		# Hide the dimmer overlay in the menu so the background/menu items remain visible
-		var dim = main_menu.get_node_or_null("Dim")
-		if dim and dim is ColorRect:
-			(dim as ColorRect).visible = false
-			(dim as ColorRect).modulate.a = 0.0
-
-		# Ensure MenuBackground TextureRect is visible and has a valid texture
-		var menu_bg = main_menu.get_node_or_null("MenuBackground")
-		if menu_bg and menu_bg is TextureRect:
-			(menu_bg as TextureRect).visible = true
-			# Ensure a valid texture; try multiple likely fallbacks
-			var try_paths = [
-				"res://Scenes/黑洞背景_簡約優雅版.png",
-				"res://Scenes/1763922312623.png",
-				"res://star_background.png",
-				"res://Scenes/star_background.png",
-				"res://Shaders/發光的星星.png",
-			]
-			if not (menu_bg as TextureRect).texture:
-				for fp in try_paths:
-					if FileAccess.file_exists(fp):
-						var tex = ResourceLoader.load(fp)
-						if tex and tex is Texture2D:
-							(menu_bg as TextureRect).texture = tex
-							break
-			# If still missing, set a solid white ColorRect behind menu to avoid gray block
-			if not (menu_bg as TextureRect).texture:
-				# Create a simple procedural gradient texture so menu isn't a flat gray
-				var gw = 1024
-				var gh = 1024
-				var img = Image.create(gw, gh, false, Image.FORMAT_RGBA8)
-				img.lock()
-				for y in range(gh):
-					for x in range(gw):
-						var t = float(y) / float(gh - 1)
-						# vertical gradient from dark to slightly lighter
-						var c = Color(0.04,0.04,0.06,1).lerp(Color(0.12,0.12,0.14,1), t)
-						img.set_pixel(x, y, c)
-				img.unlock()
-				var tex = ImageTexture.create_from_image(img)
-				(menu_bg as TextureRect).texture = tex
-			# Ensure it fills the viewport
-			(menu_bg as TextureRect).anchor_left = 0.0
-			(menu_bg as TextureRect).anchor_top = 0.0
-			(menu_bg as TextureRect).anchor_right = 1.0
-			(menu_bg as TextureRect).anchor_bottom = 1.0
-			(menu_bg as TextureRect).stretch_mode = TextureRect.STRETCH_SCALE
-
-	# Ensure background is visible; if a repeat sprite exists, make sure it's visible
-	if background_node and is_instance_valid(background_node):
-		background_node.visible = true
-	if _bg_repeat_sprite and is_instance_valid(_bg_repeat_sprite):
-		_bg_repeat_sprite.visible = true
-		_bg_repeat_sprite.z_index = -1000
-
-	# Disable project-wide fullscreen effect and any BackBufferCopy (safe default)
-	var fse = get_node_or_null("%FullScreenEffect")
-	if fse and is_instance_valid(fse):
-		fse.visible = false
-		for child in fse.get_children():
-			if child is ColorRect:
-				(child as ColorRect).visible = false
-				(child as ColorRect).modulate.a = 0.0
-
-	var bh = get_node_or_null("%BlackHole")
-	if bh and is_instance_valid(bh):
-		if bh.has_node("BackBufferCopy"):
-			var bbc = bh.get_node("BackBufferCopy")
-			if bbc and is_instance_valid(bbc):
-				bbc.visible = false
-
-	# Ensure StarBackground has a valid texture/region so menu shows properly
-	var star_bg = get_node_or_null("%StarBackground")
-	if star_bg and is_instance_valid(star_bg) and star_bg is Sprite2D:
-		# Try known fallback textures
-		if not star_bg.texture:
-			var sb_paths = [
-				"res://Scenes/1763922312623.png",
-				"res://Scenes/黑洞背景_簡約優雅版.png",
-				"res://star_background.png",
-				"res://Scenes/star_background.png",
-			]
-			for p in sb_paths:
-				if FileAccess.file_exists(p):
-					var t = ResourceLoader.load(p)
-					if t and t is Texture2D:
-						star_bg.texture = t
-						break
-		# Make sure it's visible and covers the viewport with region sampling
-		star_bg.visible = true
-		star_bg.region_enabled = true
-		var vp = get_viewport()
-		var vp_size = Vector2.ZERO
-		if vp:
-			vp_size = vp.get_visible_rect().size
-			if vp_size == Vector2.ZERO:
-				vp_size = vp.size
-		if vp_size == Vector2.ZERO:
-			vp_size = Vector2(1280, 720)
-		var sx = max(0.001, absf(star_bg.scale.x))
-		var sy = max(0.001, absf(star_bg.scale.y))
-		var buffer = 3.0
-		var w = (vp_size.x * buffer) / sx
-		var h = (vp_size.y * buffer) / sy
-		var max_region = 50000.0
-		w = minf(w, max_region)
-		h = minf(h, max_region)
-		star_bg.region_rect = Rect2(-w * 0.5, -h * 0.5, w, h)
-		# Position it at camera/global origin if available
-		if camera and is_instance_valid(camera):
-			star_bg.global_position = camera.global_position
-		else:
-			# keep existing origin as fallback
-			star_bg.global_position = star_bg.global_position
-	var _bh_test = get_tree().root.get_node_or_null("BlackHoleGlobalTestRoot")
-	if _bh_test and is_instance_valid(_bh_test):
-		_bh_test.queue_free()
-	# Remove any residual GlobalTestControl/GlobalTestColor created by earlier debugging helpers
-	var bh_layer = get_tree().root
-	if bh_layer:
-		for child in bh_layer.get_children():
-			if child.name == "GlobalTestControl" or child.name == "GlobalTestColor" or child.name == "BlackHoleGlobalTestRoot":
-				child.queue_free()
-
-
-func _dump_startup_visibility() -> void:
-	var info := {}
-	info["HUD_exists"] = hud != null and is_instance_valid(hud)
-	info["HUD_visible"] = info["HUD_exists"] and hud.visible
-	info["MainMenu_exists"] = main_menu != null and is_instance_valid(main_menu)
-	info["MainMenu_visible"] = info["MainMenu_exists"] and main_menu.visible
-	info["background_exists"] = background_node != null and is_instance_valid(background_node)
-	info["background_visible"] = info["background_exists"] and background_node.visible
-	var fse = get_node_or_null("%FullScreenEffect")
-	info["FullScreenEffect_exists"] = fse != null and is_instance_valid(fse)
-	info["FullScreenEffect_visible"] = info["FullScreenEffect_exists"] and fse.visible
-	var bh = get_node_or_null("%BlackHole")
-	info["BlackHole_exists"] = bh != null and is_instance_valid(bh)
-	if info["BlackHole_exists"]:
-		if bh.has_node("BackBufferCopy"):
-			var bbc = bh.get_node("BackBufferCopy")
-			info["BackBufferCopy_exists"] = bbc != null and is_instance_valid(bbc)
-			info["BackBufferCopy_visible"] = info["BackBufferCopy_exists"] and bbc.visible
-	# Gather root ColorRect overlays
-	var root = get_tree().root
-	var overlays := []
-	if root:
-		for c in root.get_children():
-			for d in c.get_children():
-				if d is ColorRect:
-					var cr = d as ColorRect
-					var sz = Vector2.ZERO
-					if cr.has_method("get_size"):
-						sz = cr.get_size()
-					overlays.append({"path": cr.get_path(), "color": cr.color, "visible": cr.visible, "size": sz})
-	info["overlays"] = overlays
-	# Additional diagnostics: menu background texture, star background, viewport and camera
-	var mb_info := {}
-	var menu_bg = main_menu.get_node_or_null("MenuBackground") if main_menu else null
-	if menu_bg and is_instance_valid(menu_bg) and menu_bg is TextureRect:
-		mb_info["exists"] = true
-		mb_info["visible"] = (menu_bg as TextureRect).visible
-		mb_info["texture_path"] = (menu_bg as TextureRect).texture.resource_path if (menu_bg as TextureRect).texture else "<null>"
-	else:
-		mb_info["exists"] = false
-	info["menu_background"] = mb_info
-
-	var sb_info := {}
-	var star_bg = get_node_or_null("%StarBackground")
-	if star_bg and is_instance_valid(star_bg) and star_bg is Sprite2D:
-		sb_info["exists"] = true
-		sb_info["visible"] = star_bg.visible
-		sb_info["texture_path"] = star_bg.texture.resource_path if star_bg.texture else "<null>"
-		sb_info["region_enabled"] = star_bg.region_enabled
-		sb_info["region_rect"] = star_bg.region_rect if star_bg.region_enabled else "<none>"
-	else:
-		sb_info["exists"] = false
-	info["star_background"] = sb_info
-
-	var vp = get_viewport()
-	var cam = vp.get_camera_2d() if vp else null
-	info["viewport_size"] = vp.get_visible_rect().size if vp else Vector2.ZERO
-	info["camera_global_pos"] = cam.global_position if cam else null
-
-	print("[StartupVisibility] ", info)
-
-
-func _clear_large_overlays() -> void:
-	# Hide any ColorRect/TextureRect that covers most of the viewport and is visible/opaque
-	var vp = get_viewport()
-	var vp_size = Vector2.ZERO
-	if vp:
-		vp_size = vp.get_visible_rect().size
-	if vp_size == Vector2.ZERO:
-		vp_size = vp.size if vp else Vector2.ZERO
-	if vp_size == Vector2.ZERO:
-		return
-	var root = get_tree().root
-	if not root:
-		return
-	for c in root.get_children():
-		# check descendants
-		var stack = [c]
-		while stack.size() > 0:
-			var n = stack.pop_back()
-			for ch in n.get_children():
-				stack.append(ch)
-			if n is ColorRect or n is TextureRect:
-				var cr = n as Control
-				var size = Vector2.ZERO
-				if cr.has_method("get_size"):
-					size = cr.get_size()
-				# If it covers >40% of viewport area and is visible and fairly opaque, hide it
-				if size != Vector2.ZERO:
-					var area = size.x * size.y
-					var vp_area = max(1.0, vp_size.x * vp_size.y)
-					if area / vp_area > 0.40 and cr.visible:
-						# check opacity via modulate or color
-						var alpha = 1.0
-						if n is ColorRect:
-							alpha = (n as ColorRect).modulate.a
-						elif n is TextureRect:
-							alpha = (n as TextureRect).modulate.a
-						if alpha > 0.05:
-							cr.visible = false
-							if cr.has_method("set_material"):
-								cr.set_material(null)
-							if n is ColorRect:
-								(n as ColorRect).modulate.a = 0.0
-							print("[OverlayClear] Hid overlay:", cr.get_path(), "size=", size, "alpha=", alpha)
-
-
-func _dump_root_overlay_info(root: Node) -> void:
-	# Print a concise tree of root children, CanvasLayer layers, ColorRect/TextureRect materials and colors
-	var rt = root if root else get_tree().root
-	if not rt:
-		print("_dump_root_overlay_info: no root available")
-		return
-	print("_dump_root_overlay_info: ROOT CHILDREN LISTING -------------------")
-	for c in rt.get_children():
-		var line = "%s - %s" % [c.name, c.get_class()]
-		if c is CanvasLayer:
-			line += " [CanvasLayer layer=%s]" % str(c.layer)
-		if c is Control:
-			var sz = Vector2.ZERO
-			if c.has_method("get_size"):
-				sz = c.get_size()
-			line += " [Control size=%s visible=%s]" % [str(sz), str(c.visible)]
-		# search immediate children for ColorRect/TextureRect
-		for d in c.get_children():
-			if d is ColorRect:
-				var cr = d as ColorRect
-				line += " => ColorRect(name=%s color=%s modulate=%s visible=%s material=%s)" % [cr.name, str(cr.color), str(cr.modulate), str(cr.visible), str(cr.material != null)]
-			elif d is TextureRect:
-				var tr = d as TextureRect
-				line += " => TextureRect(name=%s stretch=%s visible=%s material=%s)" % [tr.name, str(tr.stretch_mode), str(tr.visible), str(tr.material != null)]
-		print(line)
-	print("_dump_root_overlay_info: END LIST --------------------------------")
-
-
-func _aggressive_clear_overlays(root: Node) -> void:
-	if not root:
-		return
-	var candidates: Array = []
-	# scan root and two levels deep to find full-screen ColorRect/CanvasItems
-	for c in root.get_children():
-		# direct ColorRect child
-		if c is ColorRect:
-			c.visible = false
-			c.modulate.a = 0.0
-			if c.has_method("set_material"):
-				c.set_material(null)
-			c.queue_free()
-		# check grandchildren
-		for d in c.get_children():
-			if d is ColorRect:
-				var cr = d as ColorRect
-				# Heuristic: strong red tint or alpha > 0.3
-				if cr.color.r > 0.6 or cr.modulate.a > 0.3 or cr.color.a > 0.3:
-					cr.visible = false
-					cr.color.a = 0.0
-					cr.modulate.a = 0.0
-					if cr.has_method("set_material"):
-						cr.set_material(null)
-					cr.queue_free()
-			# Also target TextureRect used as overlays
-			if d is TextureRect:
-				var tr = d as TextureRect
-				tr.visible = false
-				if tr.has_method("set_material"):
-					tr.set_material(null)
-				tr.queue_free()
-	# Additionally, clear top-level CanvasLayer children with extreme layer values
-	for c in root.get_children():
-		if c is CanvasLayer:
-			var cl = c as CanvasLayer
-			if cl.layer >= 1000:
-				for ch in cl.get_children():
-					if ch is ColorRect or ch is Control or ch is TextureRect:
-						ch.queue_free()
-	print("_aggressive_clear_overlays: attempted to remove suspicious overlays")
-
-
-func _force_dump_scene_tree(root: Node) -> void:
-	if not root:
-		return
-	print("_force_dump_scene_tree: BEGIN DUMP ---------------------------")
-	_print_scene_tree(root, 0)
-	print("_force_dump_scene_tree: END DUMP -----------------------------")
-
-
-func _print_scene_tree(node: Node, depth: int) -> void:
-	var indent = " ".repeat(depth * 2)
-	var info = "%s - %s" % [node.get_path(), node.get_class()]
-	if node is CanvasLayer:
-		info += " [CanvasLayer layer=%s]" % str((node as CanvasLayer).layer)
-	if node is Control:
-		var c = node as Control
-		if c.has_method("get_size"):
-			info += " [Control size=%s visible=%s]" % [str(c.get_size()), str(c.visible)]
-	if node is ColorRect:
-		var cr = node as ColorRect
-		info += " [ColorRect color=%s modulate=%s visible=%s material=%s]" % [str(cr.color), str(cr.modulate), str(cr.visible), str(cr.material != null)]
-	if node is TextureRect:
-		var tr = node as TextureRect
-		info += " [TextureRect visible=%s material=%s]" % [str(tr.visible), str(tr.material != null)]
-	print(indent + info)
-	# Recurse
-	for ch in node.get_children():
-		_print_scene_tree(ch, depth + 1)
 
 
 func _reset_feedback_overlays_for_menu() -> void:
@@ -3854,23 +3459,29 @@ func _update_campaign_atmosphere(delta: float, proximity: float, force_hide: boo
 		if _campaign_flow_lines and is_instance_valid(_campaign_flow_lines):
 			_campaign_flow_lines.default_color = Color(fog.r, fog.g, fog.b, 0.0)
 			_campaign_flow_lines.clear_points()
+		_campaign_prev_proximity = -1.0
 		return
+
+	# Skip rebuild if proximity hasn't changed meaningfully
+	var p: float = clampf(proximity, 0.0, 1.0)
+	var proximity_changed: bool = absf(p - _campaign_prev_proximity) >= 0.01
+	_campaign_prev_proximity = p
 
 	_campaign_flow_time += delta
 	var vp: Vector2 = get_viewport_rect().size
 	var center: Vector2 = vp * 0.5
-	var p: float = clampf(proximity, 0.0, 1.0)
 
 	if _campaign_sand_particles and is_instance_valid(_campaign_sand_particles):
 		_campaign_sand_particles.position = center
 		_campaign_sand_particles.emitting = (p > 0.02)
-		_campaign_sand_particles.amount = int(lerpf(60.0, 260.0, p))
-		_campaign_sand_particles.modulate = Color(fog.r, fog.g, fog.b, lerpf(0.0, 0.55, p))
-		var pm := _campaign_sand_particles.process_material as ParticleProcessMaterial
-		if pm:
-			pm.emission_sphere_radius = lerpf(340.0, 220.0, p)
-			pm.initial_velocity_min = lerpf(18.0, 55.0, p)
-			pm.initial_velocity_max = lerpf(65.0, 165.0, p)
+		if proximity_changed:
+			_campaign_sand_particles.amount = int(lerpf(60.0, 260.0, p))
+			_campaign_sand_particles.modulate = Color(fog.r, fog.g, fog.b, lerpf(0.0, 0.55, p))
+			var pm := _campaign_sand_particles.process_material as ParticleProcessMaterial
+			if pm:
+				pm.emission_sphere_radius = lerpf(340.0, 220.0, p)
+				pm.initial_velocity_min = lerpf(18.0, 55.0, p)
+				pm.initial_velocity_max = lerpf(65.0, 165.0, p)
 
 	if _campaign_flow_lines and is_instance_valid(_campaign_flow_lines):
 		var a: float = lerpf(0.0, 0.26, p)
@@ -3878,7 +3489,7 @@ func _update_campaign_atmosphere(delta: float, proximity: float, force_hide: boo
 		_campaign_flow_lines.clear_points()
 		# Simple spiral: screen-space flow lines that feel like "currents".
 		var turns: float = lerpf(1.8, 3.4, p)
-		var pts: int = 72
+		var pts: int = 36  # Reduced from 72 — visually identical on mobile
 		var r0: float = lerpf(220.0, 160.0, p)
 		var r1: float = lerpf(560.0, 820.0, p)
 		var t0: float = _campaign_flow_time * lerpf(0.45, 1.15, p)
@@ -3951,12 +3562,8 @@ func _show_campaign_clear() -> void:
 	_revive_prompt_open = false
 	is_game_over = true
 	# Stop spawning and player control while the dialog is open.
-	if spawn_timer:
-		spawn_timer.stop()
-	if enemy_spawn_timer:
-		enemy_spawn_timer.stop()
-	if _powerup_spawn_timer:
-		_powerup_spawn_timer.stop()
+	if _spawn_mgr:
+		_spawn_mgr.stop_timers()
 	var player_controller = get_node_or_null("PlayerController")
 	if player_controller:
 		player_controller.set_physics_process(false)
@@ -4035,75 +3642,22 @@ func _setup_emp_reward_dialog() -> void:
 	add_child(_emp_reward_dialog)
 	_emp_reward_dialog.custom_action.connect(_on_emp_reward_selected)
 
-func _setup_spawning():
-	spawn_timer = Timer.new()
-	add_child(spawn_timer)
-	spawn_timer.wait_time = spawn_rate
-	spawn_timer.autostart = false
-	spawn_timer.one_shot = false
-	spawn_timer.timeout.connect(_spawn_object)
-	# 等開始遊戲才 start()
-
-func _setup_enemy_spawning():
-	enemy_spawn_timer = Timer.new()
-	add_child(enemy_spawn_timer)
-	enemy_spawn_timer.wait_time = 8.0
-	enemy_spawn_timer.timeout.connect(_spawn_enemy)
-	# 等開始遊戲才 start()
-
-
-func _setup_powerup_spawning() -> void:
-	_powerup_spawn_timer = Timer.new()
-	add_child(_powerup_spawn_timer)
-	_powerup_spawn_timer.wait_time = powerup_spawn_interval
-	_powerup_spawn_timer.autostart = false
-	_powerup_spawn_timer.one_shot = false
-	_powerup_spawn_timer.timeout.connect(_spawn_powerup)
-	# 等開始遊戲才 start()
-
-
-func _spawn_powerup() -> void:
-	if not game_started or is_game_over:
-		return
-	if not (_magnet_scene and _hourglass_scene):
-		return
-	var scene := _magnet_scene if randf() < 0.6 else _hourglass_scene
-	var item = scene.instantiate()
-	item.global_position = _get_spawn_position()
-	if item is RigidBody2D:
-		(item as RigidBody2D).linear_velocity = Vector2.RIGHT.rotated(randf() * TAU) * randf_range(50.0, 120.0)
-	add_child(item)
-
 
 func _on_powerup_collected(powerup_type: StringName) -> void:
-	match String(powerup_type):
-		"MAGNET":
-			_magnet_time_left = max(_magnet_time_left, magnet_duration)
-		"HOURGLASS":
-			_activate_hourglass(hourglass_duration)
-		_:
-			pass
-
-
-func _activate_hourglass(duration: float) -> void:
-	_hourglass_time_left = max(_hourglass_time_left, duration)
-	if _hourglass_active:
-		return
-	_hourglass_active = true
-	_set_combat_frozen(true)
-
-
-func _set_combat_frozen(frozen: bool) -> void:
-	for e in get_tree().get_nodes_in_group("Enemies"):
-		if not is_instance_valid(e):
-			continue
-		if e.has_method("set_frozen"):
-			e.set_frozen(frozen)
-		else:
-			e.set_physics_process(not frozen)
-	for p in get_tree().get_nodes_in_group("EnemyProjectiles"):
-		if is_instance_valid(p):
-			p.set_physics_process(not frozen)
+	if _spawn_mgr:
+		_spawn_mgr.on_powerup_collected(powerup_type)
+	# 任務追蹤
+	if has_node("/root/MissionManager"):
+		get_node("/root/MissionManager").report_powerup_collected()
+	match powerup_type:
+		&"MAGNET":
+			_show_toast("磁力啟動！", Color(1, 0.4, 0.8))
+		&"HOURGLASS":
+			_show_toast("時間凍結！", Color(0.3, 0.9, 1))
+		&"SHIELD":
+			_show_toast("護盾啟動！ 8秒免傷", Color(0.3, 0.6, 1))
+		&"SCORE_BOOST":
+			_show_toast("雙倍得分！ 10秒", Color(1, 0.85, 0.2))
 
 # ----------------------------------------------------
 # 遊戲主循環
@@ -4126,6 +3680,13 @@ func _process(delta):
 		# _update_dynamic_audio(delta)
 		_update_wanted_overlay(delta)
 		_update_fever_combo_ui()
+
+	# Swallow combo timer
+	if _combo_timer > 0.0:
+		_combo_timer -= delta
+		if _combo_timer <= 0.0:
+			_combo_count = 0
+			_update_combo_ui()
 
 	# Timer + wanted progression must update every frame.
 	_update_timer_and_wanted(delta)
@@ -4230,29 +3791,8 @@ func _world_to_screen(world_pos: Vector2) -> Vector2:
 
 
 func _spawn_campaign_center_enemy(proximity: float) -> void:
-	if not game_started or not enemy_scene or is_game_over:
-		return
-	# Respect the existing caps.
-	if get_tree().get_nodes_in_group("Enemies").size() >= max_enemies_alive:
-		return
-	if get_tree().get_nodes_in_group("EnemyProjectiles").size() >= max_enemy_projectiles_alive:
-		return
-	if not camera or not %BlackHole:
-		return
-
-	var enemy = enemy_scene.instantiate()
-	# Spawn around the campaign center (closer as proximity increases).
-	var r_min: float = lerpf(950.0, 520.0, proximity)
-	var r_max: float = lerpf(1450.0, 820.0, proximity)
-	var a: float = randf() * TAU
-	var r: float = randf_range(r_min, r_max)
-	enemy.global_position = _campaign_center + Vector2(cos(a), sin(a)) * r
-	if enemy.has_method("set_target"):
-		enemy.set_target(%BlackHole)
-	if enemy.has_method("set_stage"):
-		enemy.set_stage(wanted_level)
-	enemy.add_to_group("Enemies")
-	add_child(enemy)
+	if _spawn_mgr:
+		_spawn_mgr.spawn_campaign_center_enemy(_campaign_center, proximity)
 
 
 func _update_background() -> void:
@@ -4307,6 +3847,11 @@ func _update_fever_combo_ui() -> void:
 	if not fever_bar or not is_instance_valid(fever_bar):
 		return
 	fever_bar.max_value = float(max(1, fever_combo_required))
+	# Adjust for roguelike fever threshold reduction
+	var rum_node_fever = get_node_or_null("/root/RoguelikeUpgradeManager")
+	if rum_node_fever and rum_node_fever.has_method("get_modifier"):
+		var reduced: int = max(3, fever_combo_required - int(rum_node_fever.get_modifier("fever_threshold_reduction")))
+		fever_bar.max_value = float(max(1, reduced))
 	if _is_fever_active():
 		fever_bar.visible = true
 		fever_bar.value = fever_bar.max_value
@@ -4330,7 +3875,12 @@ func _register_swallow_for_fever() -> void:
 		_fever_combo_count = 1
 	_fever_combo_last_sec = now_sec
 	_update_fever_combo_ui()
-	if _fever_combo_count >= fever_combo_required:
+	# Apply roguelike fever threshold reduction (e.g. berserker character)
+	var _effective_fever_required: int = fever_combo_required
+	var rum_node = get_node_or_null("/root/RoguelikeUpgradeManager")
+	if rum_node and rum_node.has_method("get_modifier"):
+		_effective_fever_required = max(3, fever_combo_required - int(rum_node.get_modifier("fever_threshold_reduction")))
+	if _fever_combo_count >= _effective_fever_required:
 		_fever_combo_count = 0
 		_fever_combo_last_sec = -9999.0
 		var bh = %BlackHole
@@ -4342,11 +3892,16 @@ func _on_black_hole_fever_started(_duration: float) -> void:
 	# 移速提升：透過 PlayerController 的 speed multiplier
 	var pc = get_node_or_null("PlayerController")
 	if pc and pc.has_method("apply_speed_multiplier"):
-		var mult: float = 1.5
+		var fever_mult: float = 1.5
 		var bh = %BlackHole
 		if bh and bh.has_method("get_fever_speed_multiplier"):
-			mult = float(bh.call("get_fever_speed_multiplier"))
-		pc.call("apply_speed_multiplier", mult)
+			fever_mult = float(bh.call("get_fever_speed_multiplier"))
+		# Layer fever speed on top of roguelike + meta speed
+		var base_speed: float = 1.0 + float(upgrade_speed_level) * 0.08
+		var rum_speed = get_node_or_null("/root/RoguelikeUpgradeManager")
+		if rum_speed and rum_speed.has_method("get_multiplier"):
+			base_speed *= rum_speed.get_multiplier("move_speed_mult")
+		pc.call("apply_speed_multiplier", base_speed * fever_mult)
 	_show_toast("FEVER MODE!", Color(1.0, 0.92, 0.35))
 	_flash_screen(Color(1.0, 0.92, 0.35), 0.18, 0.22)
 	_start_shake(0.16, 8.0)
@@ -4355,9 +3910,8 @@ func _on_black_hole_fever_started(_duration: float) -> void:
 
 
 func _on_black_hole_fever_ended() -> void:
-	var pc = get_node_or_null("PlayerController")
-	if pc and pc.has_method("apply_speed_multiplier"):
-		pc.call("apply_speed_multiplier", 1.0)
+	# Restore proper speed (meta + roguelike modifiers) instead of resetting to 1.0
+	_apply_roguelike_speed()
 	_update_fever_combo_ui()
 	_hide_enemy_combo_label()
 
@@ -4450,6 +4004,58 @@ func _on_black_hole_fever_enemy_combo(combo: int, world_pos: Vector2) -> void:
 	)
 
 
+# ---- Swallow Combo UI ----
+func _ensure_combo_ui() -> void:
+	if _combo_label and is_instance_valid(_combo_label):
+		return
+	var hud_node := get_node_or_null("%HUD") as Control
+	if not hud_node:
+		return
+	_combo_label = Label.new()
+	_combo_label.name = "SwallowComboLabel"
+	_combo_label.visible = false
+	_combo_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_combo_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_combo_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_combo_label.add_theme_font_size_override("font_size", 42)
+	_combo_label.add_theme_color_override("font_outline_color", Color(0.0, 0.0, 0.0, 0.85))
+	_combo_label.add_theme_constant_override("outline_size", 6)
+	_combo_label.modulate = Color(0.4, 1.0, 0.9, 1.0)
+	# Position in top-right area, below score
+	_combo_label.anchor_left = 1.0
+	_combo_label.anchor_right = 1.0
+	_combo_label.anchor_top = 0.0
+	_combo_label.anchor_bottom = 0.0
+	_combo_label.offset_left = -260.0
+	_combo_label.offset_right = -16.0
+	_combo_label.offset_top = 80.0
+	_combo_label.offset_bottom = 120.0
+	hud_node.add_child(_combo_label)
+
+
+func _update_combo_ui() -> void:
+	_ensure_combo_ui()
+	if not _combo_label or not is_instance_valid(_combo_label):
+		return
+	if _combo_count <= 1:
+		_combo_label.visible = false
+		return
+	var mult: float = COMBO_MULTIPLIERS[mini(_combo_count, COMBO_MULTIPLIERS.size() - 1)]
+	_combo_label.text = "COMBO x%d (%.1f倍)" % [_combo_count, mult]
+	_combo_label.visible = true
+	# Color ramp: cyan → yellow → hot red
+	var t: float = clampf(float(_combo_count - 1) / 4.0, 0.0, 1.0)
+	var col := Color(0.4, 1.0, 0.9).lerp(Color(1.0, 1.0, 0.3), clampf(t * 2.0, 0.0, 1.0))
+	col = col.lerp(Color(1.0, 0.3, 0.2), clampf((t - 0.5) * 2.0, 0.0, 1.0))
+	# Pulse animation
+	if _combo_tween and _combo_tween.is_valid():
+		_combo_tween.kill()
+	_combo_tween = create_tween()
+	_combo_label.modulate = Color(col.r, col.g, col.b, 1.0)
+	_combo_label.scale = Vector2(1.3, 1.3)
+	_combo_tween.tween_property(_combo_label, "scale", Vector2.ONE, 0.15).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+
+
 func _on_shockwave_button_pressed() -> void:
 	var bh = %BlackHole
 	if not bh or not bh.has_method("trigger_shockwave"):
@@ -4458,7 +4064,10 @@ func _on_shockwave_button_pressed() -> void:
 	var ok: bool = bool(bh.call("trigger_shockwave"))
 	if not ok:
 		_show_toast("穩定度不足：無法釋放衝擊波", Color(1, 0.6, 0.6))
-
+	else:
+		_run_shockwave_count += 1
+		if has_node("/root/MissionManager"):
+			get_node("/root/MissionManager").report_shockwave_used()
 
 func _update_wanted_overlay(delta: float) -> void:
 	if not wanted_overlay or not is_instance_valid(wanted_overlay):
@@ -4470,18 +4079,22 @@ func _update_wanted_overlay(delta: float) -> void:
 
 func _update_timer_and_wanted(delta: float) -> void:
 	# 遊戲計時（沙漏：暫停倒數）
-	if _hourglass_time_left > 0.0:
-		_hourglass_time_left -= delta
-		if _hourglass_time_left <= 0.0:
-			_hourglass_time_left = 0.0
-			_hourglass_active = false
-			_set_combat_frozen(false)
+	if _spawn_mgr and _spawn_mgr.hourglass_time_left > 0.0:
+		_spawn_mgr.hourglass_time_left -= delta
+		if _spawn_mgr.hourglass_time_left <= 0.0:
+			_spawn_mgr.hourglass_time_left = 0.0
+			_spawn_mgr.hourglass_active = false
+			_spawn_mgr.set_combat_frozen(false)
 	else:
 		time_left -= delta
 	_update_time_ui()
-	if time_left <= 0:
+	if game_mode != GameMode.ENDLESS and time_left <= 0:
 		_game_over("TIME_LIMIT_EXCEEDED")
 		return
+	# 任務：存活秒數追蹤
+	if has_node("/root/MissionManager"):
+		var survived: int = int(game_duration - time_left)
+		get_node("/root/MissionManager").report_survive_time(survived)
 	# 通緝等級檢查
 	_check_wanted_level()
 
@@ -4493,15 +4106,15 @@ func _physics_process(delta):
 	if game_mode == GameMode.CAMPAIGN and _campaign_vortex_enabled:
 		_apply_campaign_vortex(delta)
 	# 磁鐵：10 秒內把「看得到的獵物」都吸進來
-	if _magnet_time_left > 0.0:
-		_magnet_time_left -= delta
+	if _spawn_mgr and _spawn_mgr.magnet_time_left > 0.0:
+		_spawn_mgr.magnet_time_left -= delta
 		var bh = %BlackHole
 		if bh and camera:
 			var vp = get_viewport_rect().size
 			var z = camera.zoom
 			var world_size = Vector2(vp.x / max(0.001, z.x), vp.y / max(0.001, z.y))
 			var view_rect = Rect2(camera.global_position - world_size * 0.5, world_size)
-			for prey in get_tree().get_nodes_in_group("Prey"):
+			for prey in _get_cached_group("Prey"):
 				if not is_instance_valid(prey):
 					continue
 				if not (prey is RigidBody2D):
@@ -4513,6 +4126,24 @@ func _physics_process(delta):
 				var force = dir.normalized() * magnet_strength * (1.0 / (dist / 200.0))
 				(prey as RigidBody2D).apply_central_force(force * delta * 60.0)
 
+	# Shield timer
+	if _spawn_mgr and _spawn_mgr.shield_time_left > 0.0:
+		_spawn_mgr.shield_time_left -= delta
+		if _spawn_mgr.shield_time_left <= 0.0:
+			_spawn_mgr.shield_time_left = 0.0
+			var bh2 = %BlackHole
+			if bh2 and bh2.has_method("set_shield_active"):
+				bh2.set_shield_active(false)
+
+	# Score boost timer (multiplier applied in _on_swallowed)
+	if _spawn_mgr and _spawn_mgr.score_boost_time_left > 0.0:
+		_spawn_mgr.score_boost_time_left -= delta
+		if _spawn_mgr.score_boost_time_left <= 0.0:
+			_spawn_mgr.score_boost_time_left = 0.0
+
+	# Roguelike: passive magnet effect
+	_apply_roguelike_passive_magnet(delta)
+
 
 func _apply_campaign_vortex(delta: float) -> void:
 	var center := _campaign_center
@@ -4522,7 +4153,7 @@ func _apply_campaign_vortex(delta: float) -> void:
 	# Affect common dynamic bodies only.
 	var groups := ["Prey", "Enemies", "EnemyProjectiles", "Swallowables"]
 	for g in groups:
-		for n in get_tree().get_nodes_in_group(g):
+		for n in _get_cached_group(g):
 			if not is_instance_valid(n):
 				continue
 			if not (n is RigidBody2D):
@@ -4555,18 +4186,23 @@ func _check_campaign_progress() -> void:
 
 func _update_time_ui():
 	if time_label:
-		var total_seconds = int(time_left)
-		
-		# 【修正整數除法警告】將 60 寫成 60.0，強制進行浮點數除法，然後取整數分鐘
-		var mins = int(total_seconds / 60.0) 
-		var secs = total_seconds % 60
-		
-		time_label.text = "限時: %02d:%02d" % [mins, secs]
-		
-		if time_left < 10:
-			time_label.modulate = Color.RED
+		if game_mode == GameMode.ENDLESS:
+			# Endless: show elapsed time instead of countdown
+			var elapsed: float = game_duration - time_left
+			var total_seconds = int(elapsed)
+			var mins = int(total_seconds / 60.0)
+			var secs = total_seconds % 60
+			time_label.text = "存活: %02d:%02d" % [mins, secs]
+			time_label.modulate = Color(0.3, 1.0, 0.6)
 		else:
-			time_label.modulate = Color.WHITE
+			var total_seconds = int(time_left)
+			var mins = int(total_seconds / 60.0)
+			var secs = total_seconds % 60
+			time_label.text = "限時: %02d:%02d" % [mins, secs]
+			if time_left < 10:
+				time_label.modulate = Color.RED
+			else:
+				time_label.modulate = Color.WHITE
 
 # ----------------------------------------------------
 # 攝影機動態縮放
@@ -4587,106 +4223,53 @@ func _update_camera_zoom(delta):
 # ----------------------------------------------------
 # 生成邏輯
 # ----------------------------------------------------
-func _get_spawn_position() -> Vector2:
-	var center = camera.global_position if camera else Vector2.ZERO
-	var vp = get_viewport_rect().size
-	var angle = randf() * TAU 
-	var zoom_scale := 1.0
-	if camera:
-		zoom_scale = 1.0 / max(0.001, min(camera.zoom.x, camera.zoom.y))
-	# 讓生成位置大致落在「螢幕邊緣附近」，不因 zoom 變化而跑到螢幕中央
-	var radius = max(vp.x, vp.y) * 0.7 * zoom_scale
-	return center + Vector2(cos(angle), sin(angle)) * radius
-
-func _spawn_object():
-	if not game_started or not object_scene or is_game_over: return
-	# 效能保護：限制場上獵物數量
-	var prey_now := get_tree().get_nodes_in_group("Prey").size()
-	if prey_now >= max_prey_alive:
-		return
-	var bh = %BlackHole
-	var lv = 1
-	if bh:
-		lv = int(bh.get("current_level"))
-		if lv <= 0:
-			lv = 1
-	var spawn_count = clamp(prey_base_spawn_count + int(lv / 10), 1, prey_max_spawn_count)
-	spawn_count = min(spawn_count, max(0, max_prey_alive - prey_now))
-	for i in range(spawn_count):
-		var obj = object_scene.instantiate()
-		obj.global_position = _get_spawn_position()
-		if obj is RigidBody2D and %BlackHole:
-			var to_bh = (%BlackHole.global_position - obj.global_position)
-			var dir_to_bh = to_bh.normalized() if to_bh.length() > 0.001 else Vector2.RIGHT
-			# 讓獵物不會直接往黑洞衝，避免「原地等就吃到」
-			var random_dir = Vector2.RIGHT.rotated(randf() * TAU)
-			var drift = random_dir * randf_range(60.0, 200.0)
-			var away_bias = (-dir_to_bh) * randf_range(20.0, 120.0)
-			obj.linear_velocity = drift + away_bias
-		add_child(obj)
-
-func _spawn_enemy():
-	if not game_started or not enemy_scene or is_game_over:
-		return
-	var enemies_now: int = get_tree().get_nodes_in_group("Enemies").size()
-	if enemies_now >= max_enemies_alive:
-		return
-	# 目標：場上敵人數量「動態維持在定值」(依 wanted 調整)，低於目標就補怪
-	var desired: int = 2
-	match wanted_level:
-		0:
-			desired = 2
-		1:
-			desired = 3
-		2:
-			desired = 5
-		3:
-			desired = 7
-		4:
-			desired = 9
-		5:
-			desired = 11
-	desired = clampi(desired, 1, max_enemies_alive)
-	if enemies_now >= desired:
-		return
-
-	# 子彈太多時仍然允許「補到目標」但避免額外加壓：每次最多補 3 隻
-	var spawn_count: int = clampi(desired - enemies_now, 1, 3)
-	# 若子彈已接近上限，仍補怪但不要一次補太多
-	var proj_now: int = get_tree().get_nodes_in_group("EnemyProjectiles").size()
-	if proj_now >= max_enemy_projectiles_alive:
-		spawn_count = mini(spawn_count, 1)
-
-	for i in range(spawn_count):
-		var enemy = enemy_scene.instantiate()
-		enemy.global_position = _get_spawn_position()
-		if enemy.has_method("set_target") and %BlackHole:
-			enemy.set_target(%BlackHole)
-		# Wave N 會出現 1..N 的敵人：透過 cycle 讓組成穩定、可預期
-		var stage := _next_enemy_stage_for_spawn()
-		if enemy.has_method("set_stage"):
-			enemy.set_stage(stage)
-		# 【新增】將所有敵人加入 "Enemies" 群組，方便 EMP 銷毀
-		enemy.add_to_group("Enemies")
-		add_child(enemy)
-
 
 func _apply_enemy_stage_to_all(stage: int) -> void:
-	for e in get_tree().get_nodes_in_group("Enemies"):
-		if not is_instance_valid(e):
-			continue
-		if e.has_method("set_stage"):
-			e.set_stage(stage)
+	if _spawn_mgr:
+		_spawn_mgr.apply_enemy_stage_to_all(stage)
 
 # ----------------------------------------------------
 # 訊號處理
 # ----------------------------------------------------
 func _on_swallowed(score_gain):
-	# 確保 score_gain 是一個正數，並且將其加到總分數
 	if score_gain > 0:
-		current_score += score_gain
+		# Combo multiplier: rapid swallows increase score
+		# Roguelike: combo_window_bonus extends the combo window
+		var combo_window: float = COMBO_WINDOW
+		if has_node("/root/RoguelikeUpgradeManager"):
+			combo_window += get_node("/root/RoguelikeUpgradeManager").get_modifier("combo_window_bonus")
+		if _combo_timer > 0.0:
+			_combo_count = mini(_combo_count + 1, COMBO_MULTIPLIERS.size() - 1)
+		else:
+			_combo_count = 1
+		_combo_timer = combo_window
+		var mult: float = COMBO_MULTIPLIERS[mini(_combo_count, COMBO_MULTIPLIERS.size() - 1)]
+		# Score boost powerup doubles score
+		if _spawn_mgr and _spawn_mgr.score_boost_time_left > 0.0:
+			mult *= 2.0
+		# Roguelike: score_mult modifier
+		if has_node("/root/RoguelikeUpgradeManager"):
+			var rum = get_node("/root/RoguelikeUpgradeManager")
+			mult *= rum.get_multiplier("score_mult")
+			# Roguelike: double_score_chance
+			var dsc: float = rum.get_modifier("double_score_chance")
+			if dsc > 0.0 and randf() < dsc:
+				mult *= 2.0
+		var boosted: int = int(ceil(float(score_gain) * mult))
+		current_score += boosted
+		# Roguelike: swallow_time_bonus adds time per swallow
+		if has_node("/root/RoguelikeUpgradeManager"):
+			var time_bonus: float = get_node("/root/RoguelikeUpgradeManager").get_modifier("swallow_time_bonus")
+			if time_bonus > 0.0:
+				time_left += time_bonus
+		_update_combo_ui()
+		Events.combo_updated.emit(_combo_count, mult)
+		# 任務追蹤
+		if has_node("/root/MissionManager"):
+			var msm: Node = get_node("/root/MissionManager")
+			msm.report_swallow(1)
+			msm.report_combo(_combo_count)
 	
-	# 呼叫更新 UI 的函式，而不是在內部重複更新 Label
 	_update_score_ui()
 	
 func _on_level_up(lv):
@@ -4694,10 +4277,18 @@ func _on_level_up(lv):
 	_show_toast("核心等級提升：Lv.%d" % lv, Color(0.2, 1, 1))
 	if sfx_level_up:
 		sfx_level_up.play()
+	# 任務追蹤
+	if has_node("/root/MissionManager"):
+		get_node("/root/MissionManager").report_level_reached(int(lv))
 	
 	# 後期不要加速過頭，避免畫面物件數爆炸
-	spawn_rate = max(0.35, spawn_rate * 0.97)
-	if spawn_timer: spawn_timer.wait_time = spawn_rate
+	if _spawn_mgr:
+		_spawn_mgr.spawn_rate = max(0.35, _spawn_mgr.spawn_rate * 0.97)
+		if _spawn_mgr.spawn_timer:
+			_spawn_mgr.spawn_timer.wait_time = _spawn_mgr.spawn_rate
+
+	# Roguelike: show upgrade selection (pause game)
+	_show_roguelike_upgrade_selection(int(lv))
 
 func _on_max_level():
 	if level_label:
@@ -4723,6 +4314,263 @@ func _on_entropy_death():
 		_prompt_revive_once()
 		return
 	_game_over("ENTROPY_COLLAPSE")
+
+# ----------------------------------------------------
+# Boss 系統
+# ----------------------------------------------------
+func _on_boss_defeated() -> void:
+	"""SpawnManager 回呼：Boss 被擊敗"""
+	# 獎勵：大量分數 + 穩定度回復
+	var score_bonus: int = int(GameConfig.BOSS_SCORE_VALUE)
+	current_score += score_bonus
+	_update_score_ui()
+	var black_hole := %BlackHole
+	if black_hole:
+		black_hole.current_stability = minf(
+			black_hole.current_stability + GameConfig.BOSS_STABILITY_REWARD,
+			black_hole.max_stability)
+		black_hole.stability_changed.emit(black_hole.current_stability, black_hole.max_stability)
+	_show_toast("BOSS 擊敗！+%d 分" % score_bonus, Color(1.0, 0.85, 0.2))
+	_flash_screen(Color(1.0, 0.9, 0.3), 0.6, 0.3)
+	_start_shake(0.3, 10.0)
+	Input.vibrate_handheld(60)
+	_hide_boss_hp_bar()
+	# 任務追蹤
+	_run_enemies_killed += 1
+	if has_node("/root/MissionManager"):
+		var msm: Node = get_node("/root/MissionManager")
+		msm.report_boss_defeated()
+		msm.report_enemy_killed(1)
+
+func _on_boss_hp_changed(current_hp: float, max_hp: float) -> void:
+	"""SpawnManager 回呼：Boss HP 變化"""
+	if _boss_hp_bar:
+		_boss_hp_bar.value = current_hp
+		_boss_hp_bar.max_value = max_hp
+	if _boss_hp_label:
+		_boss_hp_label.text = "BOSS  %d / %d" % [int(current_hp), int(max_hp)]
+
+func _on_enemy_killed() -> void:
+	"""BlackHole 回呼：Fever 吞噬敵人"""
+	_run_enemies_killed += 1
+	if has_node("/root/MissionManager"):
+		get_node("/root/MissionManager").report_enemy_killed(1)
+
+# ----------------------------------------------------
+# 任務 UI（嵌入設定視窗）
+# ----------------------------------------------------
+func _rebuild_settings_missions() -> void:
+	"""重建設定視窗內的任務列表"""
+	_mission_items.clear()
+	if not _settings_mission_container or not is_instance_valid(_settings_mission_container):
+		return
+	# 清除舊子節點
+	for c in _settings_mission_container.get_children():
+		c.queue_free()
+
+	if not has_node("/root/MissionManager"):
+		return
+	var msm: Node = get_node("/root/MissionManager")
+	var missions: Array = msm.get_all_active_missions()
+	if missions.is_empty():
+		var empty_label := Label.new()
+		empty_label.text = "（今日無任務）"
+		empty_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		empty_label.add_theme_font_size_override("font_size", 18)
+		empty_label.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
+		_settings_mission_container.add_child(empty_label)
+		return
+
+	for m in missions:
+		var item_hbox := HBoxContainer.new()
+		item_hbox.add_theme_constant_override("separation", 6)
+
+		var tag_label := Label.new()
+		var mid: String = String(m.get("id", ""))
+		if mid.begins_with("daily"):
+			tag_label.text = "[日]"
+			tag_label.add_theme_color_override("font_color", Color(0.4, 0.8, 1.0))
+		else:
+			tag_label.text = "[局]"
+			tag_label.add_theme_color_override("font_color", Color(0.6, 1.0, 0.5))
+		tag_label.add_theme_font_size_override("font_size", 18)
+		item_hbox.add_child(tag_label)
+
+		var desc_label := Label.new()
+		desc_label.text = String(m.get("label", ""))
+		desc_label.add_theme_font_size_override("font_size", 18)
+		desc_label.add_theme_color_override("font_color", Color(0.9, 0.9, 0.9))
+		desc_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		item_hbox.add_child(desc_label)
+
+		var progress_label := Label.new()
+		var cur: int = int(m.get("current", 0))
+		var tgt: int = int(m.get("target", 1))
+		var completed: bool = bool(m.get("completed", false))
+		if completed:
+			progress_label.text = "✓"
+			progress_label.add_theme_color_override("font_color", Color(0.2, 1, 0.4))
+		else:
+			progress_label.text = "%d/%d" % [cur, tgt]
+			progress_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+		progress_label.add_theme_font_size_override("font_size", 18)
+		item_hbox.add_child(progress_label)
+
+		_settings_mission_container.add_child(item_hbox)
+
+		var bar := ProgressBar.new()
+		bar.custom_minimum_size = Vector2(0, 8)
+		bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		bar.max_value = tgt
+		bar.value = cur
+		bar.show_percentage = false
+		var fill_s := StyleBoxFlat.new()
+		if completed:
+			fill_s.bg_color = Color(0.2, 1, 0.4)
+		elif mid.begins_with("daily"):
+			fill_s.bg_color = Color(0.3, 0.8, 1.0)
+		else:
+			fill_s.bg_color = Color(0.4, 1.0, 0.5)
+		fill_s.set_corner_radius_all(3)
+		bar.add_theme_stylebox_override("fill", fill_s)
+		var bg_s := StyleBoxFlat.new()
+		bg_s.bg_color = Color(0.15, 0.15, 0.15, 0.9)
+		bg_s.set_corner_radius_all(3)
+		bar.add_theme_stylebox_override("background", bg_s)
+		_settings_mission_container.add_child(bar)
+
+		if completed:
+			desc_label.add_theme_color_override("font_color", Color(0.2, 1, 0.4))
+
+		_mission_items.append({
+			"id": mid,
+			"label": desc_label,
+			"progress": progress_label,
+			"bar": bar,
+			"hbox": item_hbox,
+		})
+
+
+func _update_mission_ui() -> void:
+	"""更新任務面板中各項的進度"""
+	if not has_node("/root/MissionManager"):
+		return
+	if _mission_items.is_empty():
+		return
+	var msm: Node = get_node("/root/MissionManager")
+	var missions: Array = msm.get_all_active_missions()
+	# 建立 id -> mission 字典方便查詢
+	var mission_map: Dictionary = {}
+	for m in missions:
+		mission_map[String(m.get("id", ""))] = m
+
+	for item in _mission_items:
+		var mid: String = String(item.get("id", ""))
+		if not mission_map.has(mid):
+			# 已領取/移除
+			if item.get("hbox") and is_instance_valid(item["hbox"]):
+				item["hbox"].modulate = Color(0.5, 0.5, 0.5, 0.5)
+			continue
+		var m: Dictionary = mission_map[mid]
+		var cur: int = int(m.get("current", 0))
+		var tgt: int = int(m.get("target", 1))
+		var completed: bool = bool(m.get("completed", false))
+		# 更新進度文字
+		if item.get("progress") and is_instance_valid(item["progress"]):
+			if completed:
+				(item["progress"] as Label).text = "✓"
+				(item["progress"] as Label).add_theme_color_override("font_color", Color(0.2, 1, 0.4))
+			else:
+				(item["progress"] as Label).text = "%d/%d" % [cur, tgt]
+				(item["progress"] as Label).add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+		# 更新進度條
+		if item.get("bar") and is_instance_valid(item["bar"]):
+			(item["bar"] as ProgressBar).max_value = tgt
+			(item["bar"] as ProgressBar).value = cur
+			if completed:
+				var fill_done := StyleBoxFlat.new()
+				fill_done.bg_color = Color(0.2, 1, 0.4)
+				fill_done.corner_radius_top_left = 3
+				fill_done.corner_radius_top_right = 3
+				fill_done.corner_radius_bottom_left = 3
+				fill_done.corner_radius_bottom_right = 3
+				(item["bar"] as ProgressBar).add_theme_stylebox_override("fill", fill_done)
+		# 完成時高亮描述
+		if completed and item.get("label") and is_instance_valid(item["label"]):
+			(item["label"] as Label).add_theme_color_override("font_color", Color(0.2, 1, 0.4))
+
+
+func _show_boss_hp_bar() -> void:
+	if not _boss_hp_container:
+		_create_boss_hp_bar()
+	if _boss_hp_container:
+		_boss_hp_container.visible = true
+	if _boss_hp_bar:
+		_boss_hp_bar.value = GameConfig.BOSS_MAX_HP
+		_boss_hp_bar.max_value = GameConfig.BOSS_MAX_HP
+	if _boss_hp_label:
+		_boss_hp_label.text = "BOSS  %d / %d" % [int(GameConfig.BOSS_MAX_HP), int(GameConfig.BOSS_MAX_HP)]
+
+func _hide_boss_hp_bar() -> void:
+	if _boss_hp_container:
+		_boss_hp_container.visible = false
+
+func _create_boss_hp_bar() -> void:
+	"""動態建立 Boss 血條 UI（掛在 HUD 下方）"""
+	if not hud:
+		return
+	_boss_hp_container = PanelContainer.new()
+	_boss_hp_container.name = "BossHPContainer"
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.1, 0.05, 0.05, 0.85)
+	style.corner_radius_top_left = 6
+	style.corner_radius_top_right = 6
+	style.corner_radius_bottom_left = 6
+	style.corner_radius_bottom_right = 6
+	style.content_margin_left = 12.0
+	style.content_margin_right = 12.0
+	style.content_margin_top = 6.0
+	style.content_margin_bottom = 6.0
+	_boss_hp_container.add_theme_stylebox_override("panel", style)
+
+	var vbox := VBoxContainer.new()
+	vbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	_boss_hp_container.add_child(vbox)
+
+	_boss_hp_label = Label.new()
+	_boss_hp_label.text = "BOSS"
+	_boss_hp_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_boss_hp_label.add_theme_font_size_override("font_size", 18)
+	_boss_hp_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.2))
+	vbox.add_child(_boss_hp_label)
+
+	_boss_hp_bar = ProgressBar.new()
+	_boss_hp_bar.custom_minimum_size = Vector2(280, 16)
+	_boss_hp_bar.max_value = GameConfig.BOSS_MAX_HP
+	_boss_hp_bar.value = GameConfig.BOSS_MAX_HP
+	_boss_hp_bar.show_percentage = false
+	# 紅色填充
+	var fill_style := StyleBoxFlat.new()
+	fill_style.bg_color = Color(0.85, 0.12, 0.1)
+	fill_style.corner_radius_top_left = 3
+	fill_style.corner_radius_top_right = 3
+	fill_style.corner_radius_bottom_left = 3
+	fill_style.corner_radius_bottom_right = 3
+	_boss_hp_bar.add_theme_stylebox_override("fill", fill_style)
+	var bg_style := StyleBoxFlat.new()
+	bg_style.bg_color = Color(0.2, 0.2, 0.2, 0.9)
+	bg_style.corner_radius_top_left = 3
+	bg_style.corner_radius_top_right = 3
+	bg_style.corner_radius_bottom_left = 3
+	bg_style.corner_radius_bottom_right = 3
+	_boss_hp_bar.add_theme_stylebox_override("background", bg_style)
+	vbox.add_child(_boss_hp_bar)
+
+	hud.add_child(_boss_hp_container)
+	# 嘗試定位在上方中央
+	_boss_hp_container.anchors_preset = Control.PRESET_CENTER_TOP
+	_boss_hp_container.position.y = 60.0
+	_boss_hp_container.visible = false
 
 
 func _setup_revive_dialog() -> void:
@@ -4807,12 +4655,8 @@ func _prompt_revive_once() -> void:
 		return
 	_revive_prompt_open = true
 	is_game_over = true
-	if spawn_timer:
-		spawn_timer.stop()
-	if enemy_spawn_timer:
-		enemy_spawn_timer.stop()
-	if _powerup_spawn_timer:
-		_powerup_spawn_timer.stop()
+	if _spawn_mgr:
+		_spawn_mgr.stop_timers()
 	var player_controller = get_node_or_null("PlayerController")
 	if player_controller:
 		player_controller.set_physics_process(false)
@@ -4840,12 +4684,8 @@ func _on_revive_confirmed() -> void:
 		black_hole.revive_to_ratio(revive_stability_ratio)
 	# 恢復遊戲
 	is_game_over = false
-	if spawn_timer:
-		spawn_timer.start()
-	if enemy_spawn_timer:
-		enemy_spawn_timer.start()
-	if _powerup_spawn_timer:
-		_powerup_spawn_timer.start()
+	if _spawn_mgr:
+		_spawn_mgr.start_timers()
 	var player_controller = get_node_or_null("PlayerController")
 	if player_controller:
 		player_controller.set_physics_process(true)
@@ -4863,9 +4703,8 @@ func _on_revive_declined() -> void:
 
 
 func _clear_enemy_projectiles() -> void:
-	for p in get_tree().get_nodes_in_group("EnemyProjectiles"):
-		if is_instance_valid(p):
-			p.queue_free()
+	if _spawn_mgr:
+		_spawn_mgr.clear_enemy_projectiles()
 
 # ----------------------------------------------------
 # 通緝系統邏輯
@@ -4889,9 +4728,10 @@ func _check_wanted_level():
 	if new_wanted != wanted_level:
 		var prev_wanted: int = wanted_level
 		wanted_level = new_wanted
-		_rebuild_enemy_stage_cycle()
+		if _spawn_mgr:
+			_spawn_mgr.rebuild_enemy_stage_cycle(wanted_level)
+			_spawn_mgr.update_enemy_spawning(wanted_level)
 		_update_wanted_ui()
-		_update_enemy_spawning()
 		if new_wanted > prev_wanted and new_wanted >= 1 and sfx_wanted_up:
 			sfx_wanted_up.play()
 			# Wanted 升級回饋：紅閃 + 輕震 + 震動（讓玩家知道進入生存波次）
@@ -4900,40 +4740,15 @@ func _check_wanted_level():
 			_start_shake(0.14, 4.0 + float(new_wanted) * 2.0)
 			Input.vibrate_handheld(int(12 + new_wanted * 4))
 
-
-func _rebuild_enemy_stage_cycle() -> void:
-	_enemy_stage_cycle.clear()
-	if wanted_level <= 0:
-		return
-	# Weighted mix per wave:
-	# - 70% newest (stage = wanted_level)
-	# - 30% older (stages 1..wanted_level-1)
-	# This keeps later waves feeling "new" while still including earlier enemies.
-	var bag_size: int = 10
-	var newest_count: int = int(round(float(bag_size) * 0.7))
-	newest_count = clampi(newest_count, 1, bag_size)
-	var older_count: int = max(0, bag_size - newest_count)
-
-	for _i in range(newest_count):
-		_enemy_stage_cycle.append(wanted_level)
-	if wanted_level <= 1:
-		# No older stages available.
-		for _j in range(older_count):
-			_enemy_stage_cycle.append(wanted_level)
-	else:
-		for _j in range(older_count):
-			_enemy_stage_cycle.append(randi_range(1, wanted_level - 1))
-	_enemy_stage_cycle.shuffle()
-
-
-func _next_enemy_stage_for_spawn() -> int:
-	if wanted_level <= 0:
-		return 0
-	if _enemy_stage_cycle.is_empty():
-		_rebuild_enemy_stage_cycle()
-	if _enemy_stage_cycle.is_empty():
-		return wanted_level
-	return int(_enemy_stage_cycle.pop_front())
+	# Boss 觸發：通緝等級 5 時召喚 Boss
+	if wanted_level >= GameConfig.BOSS_SPAWN_WANTED_LEVEL and _spawn_mgr and not _spawn_mgr.boss_spawned_this_run:
+		var spawned: bool = _spawn_mgr.try_spawn_boss()
+		if spawned:
+			_show_toast("⚠ BOSS 出現！⚠", Color(1.0, 0.2, 0.1))
+			_flash_screen(Color(1.0, 0.0, 0.0), 0.8, 0.4)
+			_start_shake(0.5, 15.0)
+			Input.vibrate_handheld(80)
+			_show_boss_hp_bar()
 
 
 func _hit_stop(duration: float, time_scale: float = 0.12) -> void:
@@ -5011,29 +4826,6 @@ func _on_music_pitch_toggled(pressed: bool) -> void:
 	# Keep meta saved so user preference isn't lost if re-enabled later.
 	_save_meta()
 	_show_toast("動態BGM變速 已停用 (暫時註解)", Color(0.8, 0.8, 1.0))
-	
-func _update_enemy_spawning():
-	if not enemy_spawn_timer: return
-	
-	# 根據通緝等級調整生成率（整體加快，避免「怪物很少」）
-	var new_wait_time := 8.0
-	
-	match wanted_level:
-		0: 
-			new_wait_time = 8.0
-		1: 
-			new_wait_time = 4.5
-		2:
-			new_wait_time = 2.8
-		3: 
-			new_wait_time = 1.7
-		4: 
-			new_wait_time = 1.0
-		5: 
-			new_wait_time = 0.6
-	
-	enemy_spawn_timer.wait_time = new_wait_time
-	enemy_spawn_timer.start() # 確保計時器在等級變化時被重啟
 
 # ----------------------------------------------------
 # UI 更新
@@ -5076,11 +4868,118 @@ func _trigger_emp_reward():
 	
 # 輔助函式：銷毀所有敵人
 func _clear_all_enemies():
-	# 確保你的所有敵人在 Enemy.gd 中有 add_to_group("Enemies")
-	for body in get_tree().get_nodes_in_group("Enemies"):
-		if is_instance_valid(body):
-			body.queue_free()
+	if _spawn_mgr:
+		_spawn_mgr.clear_all_enemies()
 			
+# ----------------------------------------------------
+# Roguelike 升級選擇系統
+# ----------------------------------------------------
+func _show_roguelike_upgrade_selection(lv: int) -> void:
+	if not has_node("/root/RoguelikeUpgradeManager"):
+		return
+	var rum = get_node("/root/RoguelikeUpgradeManager")
+	var choices: Array[Dictionary] = rum.generate_choices(lv)
+	if choices.is_empty():
+		return
+
+	# Pause gameplay
+	if not get_tree().paused:
+		get_tree().paused = true
+		_paused_by_upgrade = true
+
+	# Create the upgrade selection UI
+	var UpgradeUIScript: GDScript = load("res://Scripts/UpgradeSelectionUI.gd") as GDScript
+	if not UpgradeUIScript:
+		if _paused_by_upgrade:
+			get_tree().paused = false
+			_paused_by_upgrade = false
+		return
+
+	_upgrade_selection_ui = UpgradeUIScript.new() as CanvasLayer
+	add_child(_upgrade_selection_ui)
+	_upgrade_selection_ui.setup(choices)
+	_upgrade_selection_ui.upgrade_chosen.connect(_on_roguelike_upgrade_chosen)
+
+
+func _on_roguelike_upgrade_chosen(upgrade_id: String) -> void:
+	# Resume gameplay
+	if _paused_by_upgrade:
+		get_tree().paused = false
+		_paused_by_upgrade = false
+
+	# Apply movement speed modifier from roguelike
+	_apply_roguelike_speed()
+	# Apply passive magnet strength (UI toast)
+	if has_node("/root/RoguelikeUpgradeManager"):
+		var rum = get_node("/root/RoguelikeUpgradeManager")
+		var def: Dictionary = rum.find_upgrade_def(upgrade_id)
+		if not def.is_empty():
+			var rarity := String(def.get("rarity", "common"))
+			var color := Color(0.5, 0.7, 1.0)
+			match rarity:
+				"rare": color = Color(0.6, 0.3, 1.0)
+				"epic": color = Color(1.0, 0.7, 0.2)
+			_show_toast("%s %s" % [String(def.get("icon", "")), String(def.get("name", ""))], color)
+
+	Input.vibrate_handheld(30)
+
+
+func _apply_roguelike_speed() -> void:
+	if not has_node("/root/RoguelikeUpgradeManager"):
+		return
+	var rum = get_node("/root/RoguelikeUpgradeManager")
+	var speed_mult: float = rum.get_multiplier("move_speed_mult")
+	# Combine with meta upgrade speed
+	speed_mult *= 1.0 + float(upgrade_speed_level) * 0.08
+	var pc = get_node_or_null("PlayerController")
+	if pc and pc.has_method("apply_speed_multiplier"):
+		pc.apply_speed_multiplier(speed_mult)
+
+
+func _apply_roguelike_passive_magnet(delta: float) -> void:
+	"""Called from _physics_process: passive magnet from roguelike upgrades"""
+	if not has_node("/root/RoguelikeUpgradeManager"):
+		return
+	var rum = get_node("/root/RoguelikeUpgradeManager")
+	var mag_str: float = rum.get_modifier("passive_magnet")
+	if mag_str <= 0.0:
+		return
+	var bh = %BlackHole
+	if not bh or not camera:
+		return
+	var vp = get_viewport_rect().size
+	var z = camera.zoom
+	var world_size = Vector2(vp.x / max(0.001, z.x), vp.y / max(0.001, z.y))
+	var view_rect = Rect2(camera.global_position - world_size * 0.5, world_size)
+	var passive_force: float = magnet_strength * mag_str
+	for prey in _get_cached_group("Prey"):
+		if not is_instance_valid(prey):
+			continue
+		if not (prey is RigidBody2D):
+			continue
+		if not view_rect.has_point(prey.global_position):
+			continue
+		var dir = (bh.global_position - prey.global_position)
+		var dist = max(50.0, dir.length())
+		var force = dir.normalized() * passive_force * (1.0 / (dist / 200.0))
+		(prey as RigidBody2D).apply_central_force(force * delta * 60.0)
+
+
+func _handle_auto_shockwave() -> void:
+	"""Handle auto_shockwave event from RoguelikeUpgradeManager"""
+	var bh = %BlackHole
+	if not bh or not bh.has_method("trigger_shockwave"):
+		return
+	# Auto shockwave: free (cost already handled by modifier system)
+	bh.call("trigger_shockwave")
+	_show_toast("⚡ 超新星自動衝擊波！", Color(1.0, 0.8, 0.3))
+	Input.vibrate_handheld(25)
+
+
+func _on_roguelike_auto_shockwave(type: String) -> void:
+	if type == "auto_shockwave":
+		_handle_auto_shockwave()
+
 # ----------------------------------------------------
 # 遊戲結束
 # ----------------------------------------------------
@@ -5098,10 +4997,8 @@ func _game_over(reason: String):
 	_game_over_seq += 1
 	var seq: int = _game_over_seq
 	
-	spawn_timer.stop()
-	enemy_spawn_timer.stop()
-	if _powerup_spawn_timer:
-		_powerup_spawn_timer.stop()
+	if _spawn_mgr:
+		_spawn_mgr.stop_timers()
 	
 	# 清理 EMP 按鈕的 Tween 效果
 	if emp_button_tween and emp_button_tween.is_valid():
@@ -5141,6 +5038,21 @@ func _game_over(reason: String):
 	if _toast_tween and _toast_tween.is_valid():
 		_toast_tween.kill()
 		_toast_tween = null
+
+	# 局結束：自動領取已完成的局內任務獎勵
+	if has_node("/root/MissionManager"):
+		var msm: Node = get_node("/root/MissionManager")
+		var mission_coins: int = msm.auto_claim_run_missions()
+		# 每日任務也嘗試領取（本局達成的）
+		for m in msm.daily_missions:
+			if bool(m.get("completed", false)) and not bool(m.get("claimed", false)):
+				mission_coins += msm.claim_mission(String(m.get("id", "")))
+		if mission_coins > 0:
+			meta_coins += mission_coins
+			_save_meta()
+			_update_meta_ui()
+			_show_toast("任務獎勵：+%d 金幣" % mission_coins, Color(0.2, 1, 0.6))
+	_update_mission_ui()
 
 	# 3 秒後彈出選單（避免死亡瞬間打斷回饋）
 	_show_game_over_dialog_after_delay(seq)
@@ -5293,53 +5205,3 @@ func _draw_shockwave_ring(intensity: float) -> void:
 		if shockwave_ring and is_instance_valid(shockwave_ring):
 			shockwave_ring.visible = false
 	)
-
-
-# Diagnostic functions for HTML5/Safari visibility tests
-func _create_global_fullscreen_test_main() -> void:
-	var root = get_tree().root
-	if not root:
-		print("_create_global_fullscreen_test_main: no root")
-		return
-	if root.has_node("GlobalFullscreenTest_Main"):
-		print("_create_global_fullscreen_test_main: already exists")
-		return
-	var layer = CanvasLayer.new()
-	layer.name = "GlobalFullscreenTest_Main"
-	layer.layer = 20000
-	var ctrl = Control.new()
-	ctrl.name = "GlobalTestControl_Main"
-	ctrl.anchor_left = 0.0
-	ctrl.anchor_top = 0.0
-	ctrl.anchor_right = 1.0
-	ctrl.anchor_bottom = 1.0
-	# margins not required when anchors cover full rect
-	var cr = ColorRect.new()
-	cr.name = "GlobalTestColor_Main"
-	cr.color = Color(0.2, 0.8, 0.2, 0.9)
-	cr.anchor_left = 0.0
-	cr.anchor_top = 0.0
-	cr.anchor_right = 1.0
-	cr.anchor_bottom = 1.0
-	# margins not required when anchors cover full rect
-	ctrl.add_child(cr)
-	layer.add_child(ctrl)
-	root.add_child(layer)
-	print("_create_global_fullscreen_test_main: added test layer (will remove in 6s). Layer=", layer)
-	var t = Timer.new()
-	t.one_shot = true
-	t.wait_time = 6.0
-	t.name = "GlobalFullscreenTestRemover_Main"
-	layer.add_child(t)
-	t.connect("timeout", Callable(self, "_remove_global_fullscreen_test_main"))
-	t.start()
-
-
-func _remove_global_fullscreen_test_main() -> void:
-	var root = get_tree().root
-	if not root:
-		return
-	if root.has_node("GlobalFullscreenTest_Main"):
-		var n = root.get_node("GlobalFullscreenTest_Main")
-		n.queue_free()
-		print("_remove_global_fullscreen_test_main: removed test node")

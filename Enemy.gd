@@ -1,6 +1,11 @@
 extends Area2D
 
 # ----------------------------------------------------
+# 遊玩數值常數
+# ----------------------------------------------------
+const MELEE_HIT_RADIUS: float = 140.0
+
+# ----------------------------------------------------
 # 資源與節點引用
 # ----------------------------------------------------
 @export var move_speed: float = 150.0
@@ -102,7 +107,7 @@ func _physics_process(delta):
 	# Damage should apply when we reach the black hole core, not when we first enter
 	# the huge gravity Area2D.
 	if not _pending_destroy and (target.is_in_group("Player") or target.has_method("apply_damage")):
-		var r: float = 140.0
+		var r: float = MELEE_HIT_RADIUS
 		if target.has_method("get_damage_radius"):
 			r = float(target.call("get_damage_radius"))
 		if global_position.distance_to(target.global_position) <= r:
@@ -123,7 +128,7 @@ func _process(_delta: float) -> void:
 	if target.has_method("is_fever_active") and bool(target.call("is_fever_active")):
 		if not (target is Node2D):
 			return
-		var r: float = 140.0
+		var r: float = MELEE_HIT_RADIUS
 		if target.has_method("get_damage_radius"):
 			r = float(target.call("get_damage_radius"))
 		if global_position.distance_to((target as Node2D).global_position) <= r:
@@ -191,7 +196,7 @@ func _hide_telegraph() -> void:
 
 
 func _fire_projectiles(base_dir: Vector2) -> void:
-	var shots: int = max(1, burst_count)
+	var shots: int = maxi(1, burst_count)
 	var spread_rad: float = deg_to_rad(spread_degrees)
 	var start: float = -spread_rad * 0.5
 	var step: float = 0.0
@@ -234,7 +239,7 @@ func _deal_melee_hit(hit: Object) -> void:
 		# 黑洞的吸引範圍碰撞圈很大，避免遠距離「擦到」就算近戰命中
 		if hit is Node2D:
 			var d: float = global_position.distance_to((hit as Node2D).global_position)
-			var r: float = 140.0
+			var r: float = MELEE_HIT_RADIUS
 			if hit.has_method("get_damage_radius"):
 				r = float(hit.call("get_damage_radius"))
 			if d > r:

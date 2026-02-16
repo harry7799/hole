@@ -1,0 +1,23 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://BossEnemy.gd" id="1_boss"]
+[ext_resource type="Texture2D" uid="uid://cah2omn38vj54" path="res://Shaders/E5.png" id="2_tex"]
+[ext_resource type="PackedScene" uid="uid://br3o0is7v1ugq" path="res://EnemyProjectile.tscn" id="3_proj"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_boss"]
+radius = 180.0
+
+[node name="BossEnemy" type="Area2D" groups=["Enemies", "Bosses"]]
+scale = Vector2(1.2, 1.2)
+script = ExtResource("1_boss")
+projectile_scene = ExtResource("3_proj")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("CircleShape2D_boss")
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+position = Vector2(0, -4)
+rotation = -3.1415927
+scale = Vector2(2.5, 2.5)
+modulate = Color(1, 0.3, 0.2, 1)
+texture = ExtResource("2_tex")

@@ -17,6 +17,8 @@ uniform float tint_intensity : hint_range(0.0, 2.0) = 0.0; // 不穩定紅光
 uniform float radius = 0.4;     // 扭曲範圍 (由 GDScript 動態調整)
 uniform float strength = 0.05;  // 扭曲強度
 uniform float aberration = 0.02; // 色差強度
+uniform vec3 rim_color = vec3(0.0, 0.0, 0.0);  // 邊緣光暈顏色 (Phase 4B 視覺進化)
+uniform float rim_intensity : hint_range(0.0, 1.5) = 0.0; // 邊緣光暈強度
 
 void fragment() {
     vec2 uv = UV;
@@ -52,6 +54,14 @@ void fragment() {
         if (tint_intensity > 0.0) {
             vec3 red_tint = vec3(tint_intensity, 0.0, 0.0);
             twisted_color = mix(twisted_color, red_tint, tint_intensity * 0.5);
+        }
+        
+        // 視覺進化：邊緣光暈 (Phase 4B)
+        if (rim_intensity > 0.0) {
+            // 邊緣區域 (d 接近 radius 時最強)
+            float edge_factor = smoothstep(radius * 0.35, radius * 0.92, d);
+            float rim_glow = edge_factor * rim_intensity;
+            twisted_color = mix(twisted_color, rim_color, rim_glow);
         }
         
         COLOR.rgb = twisted_color;

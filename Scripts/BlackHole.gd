@@ -1,6 +1,13 @@
 extends Area2D
 
 # ----------------------------------------------------
+# 遊玩數值常數
+# ----------------------------------------------------
+const ENEMY_CONTACT_DAMAGE: float = 30.0
+const FEVER_ENEMY_STABILITY_GAIN: float = 18.0
+const GROWTH_ENERGY_DIVISOR: float = 22.0
+
+# ----------------------------------------------------
 # 節點引用
 # ----------------------------------------------------
 @onready var visuals = $Visuals
@@ -100,7 +107,7 @@ func _ensure_skin_overlay() -> void:
 @export var distort_start_level: int = 1     # 全螢幕扭曲效果開始的等級
 @export var max_distort_radius: float = 1.0   # 扭曲效果最大擴散半徑 (1.0 = 全屏)
 @export var max_distort_strength: float = 0.05 # 扭曲效果最大強度
-@export var max_distort_speed: float = 0.5    # 扭曲漣漪最大速度
+@export var max_distort_speed: float = 0.25    # 扭曲漣漪最大速度（降速）
 
 # Fullscreen fallback shader default parameters (editable in Inspector)
 @export var fs_fallback_radius: float = 0.5
@@ -133,9 +140,9 @@ signal fever_enemy_combo(combo: int, world_pos: Vector2)
 
 # Fullscreen ripple readability boosts.
 @export var ripple_strength_boost: float = 1.75
-@export var ripple_speed_boost: float = 1.75
+@export var ripple_speed_boost: float = 0.8
 @export var fever_ripple_strength_boost: float = 1.35
-@export var fever_ripple_speed_boost: float = 1.2
+@export var fever_ripple_speed_boost: float = 1.0
 
 var fever_active: bool = false
 var _fever_time_left: float = 0.0
@@ -202,10 +209,10 @@ var bodies_in_range: Array[Node2D] = []
 var swallowed_count: int = 0
 var current_level: int = 1
 
-# Overlay fallback for platforms where the visuals sprite may be invisible/occluded
-var _overlay_layer: CanvasLayer = null
-var _overlay_sprite: Sprite2D = null
-var _use_overlay_fallback: bool = false
+# Shader dirty-tracking: skip expensive param updates when inputs haven't changed
+var _prev_shader_level: int = -1
+var _prev_shader_stability: float = -1.0
+var _prev_shader_fever: bool = false
 
 # Clamp z indices to rendering server limits
 const Z_MAX: int = int(RenderingServer.CANVAS_ITEM_Z_MAX)
@@ -219,6 +226,7 @@ signal stability_depleted()
 signal powerup_collected(powerup_type: StringName)
 signal damaged(amount: float)
 signal swallowed_feedback(energy_gain: float)
+signal enemy_killed()  # 敵人被消滅時（Fever 吞噬/衝擊波等）
 signal objective_swallowed(objective_id: StringName)
 
 
@@ -250,11 +258,19 @@ func reset_for_new_run() -> void:
 	current_level = 1
 	max_pull_radius = base_pull_radius
 	kill_radius = base_kill_radius
-	current_stability = max_stability
-	stability_changed.emit(current_stability, max_stability)
+	# Roguelike: max_stability_offset modifier (character-based)
+	var stability_offset: float = 0.0
+	if has_node("/root/RoguelikeUpgradeManager"):
+		stability_offset = get_node("/root/RoguelikeUpgradeManager").get_modifier("max_stability_offset")
+	var effective_max := maxf(20.0, max_stability + stability_offset)
+	current_stability = effective_max
+	stability_changed.emit(current_stability, effective_max)
 	disable_fullscreen_distort()
 	_update_collision_and_visuals()
 	_update_shader_params()
+	# 視覺進化重置
+	if glitch_particles and glitch_particles is CPUParticles2D:
+		glitch_particles.speed_scale = 1.0
 
 # ----------------------------------------------------
 # Godot 內建函式
@@ -301,10 +317,6 @@ func _ready():
 	# 你原本的所有 _ready 內容保持不變（到 main_scene_node 為止）
 	main_scene_node = get_tree().get_first_node_in_group("MainScene")
 
-	# Deferred diagnostic: 在場景完全啟動後檢查 visuals 的父層與全域狀態
-	# (keep disabled by default to preserve original visuals/perf)
-	# call_deferred("_diagnose_visuals")
-	
 	# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
 	# 新增：直接抓場景裡的 FullScreenEffect，並在必要時套用跨平台 fallback shader
 	if full_screen_effect:
@@ -351,8 +363,6 @@ func _ready():
 			print("全屏漣漪材質成功取得！")
 	else:
 		push_error("找不到 %FullScreenEffect 節點！請確認已拖進 MainScene 並設為 Unique Name")
-	# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-# BlackHole.gd
 
 
 func _bootstrap_overlapping_bodies() -> void:
@@ -361,42 +371,6 @@ func _bootstrap_overlapping_bodies() -> void:
 			continue
 		if (body is RigidBody2D or body is CharacterBody2D or body is StaticBody2D) and body not in bodies_in_range:
 			bodies_in_range.append(body)
-
-
-func _diagnose_visuals() -> void:
-	if not visuals:
-		print("_diagnose_visuals: no visuals node found on BlackHole")
-		return
-	# basic state
-	print("_diagnose_visuals: visuals.visible=", visuals.visible, " texture=", visuals.texture, " material=", visuals.material)
-	# global transform/state
-	if visuals is Node2D:
-		var gpos = visuals.global_position
-		var gscale = visuals.global_scale if visuals.has_method("get_global_scale") else visuals.scale
-		print("_diagnose_visuals: global_position=", gpos, " scale=", gscale)
-	# walk parent chain
-	var p = visuals.get_parent()
-	var depth = 0
-	while p:
-		var info = str(depth) + ": " + p.get_class() + " (name=" + p.name + ")"
-		if p is CanvasLayer:
-			info += " [CanvasLayer, layer=" + str(p.layer) + "]"
-		if p is Control:
-			info += " [Control, rect=" + str(p.rect_size) + "]"
-		if p is Node2D:
-			info += " [Node2D, z_index=" + str(p.z_index) + "]"
-		print("_diagnose_visuals parent -> ", info)
-		p = p.get_parent()
-		depth += 1
-	# viewport info
-	var vp = get_viewport()
-	if vp:
-		print("_diagnose_visuals: viewport size=", vp.get_visible_rect().size, " canvas transform=", vp.get_canvas_transform())
-	# final enforced fix: raise z_index extremely high to avoid occlusion
-	if visuals is CanvasItem:
-		visuals.z_index = min(100000, Z_MAX)
-		print("_diagnose_visuals: forced visuals.z_index=", visuals.z_index)
-		print("_diagnose_visuals: forced visuals.z_index=", visuals.z_index)
 
 
 func ensure_visuals_visible() -> void:
@@ -427,324 +401,6 @@ func ensure_visuals_visible() -> void:
 	if visuals is CanvasItem:
 		visuals.z_index = min(max(visuals.z_index, 100000), Z_MAX)
 	print("ensure_visuals_visible: enforced visuals visible, scale=", visuals.scale, "z_index=", (visuals.z_index if visuals is CanvasItem else "N/A"))
-
-
-func get_render_debug_info() -> Dictionary:
-	var info: Dictionary = {}
-	# safe defaults
-	info["visuals_node"] = false
-	info["visuals_texture_path"] = "<unset>"
-	info["visuals_texture_size"] = Vector2.ZERO
-	info["visuals_visible"] = false
-	info["visuals_scale"] = Vector2.ZERO
-	info["visuals_modulate"] = Color(1,1,1,1)
-	info["visuals_z_index"] = null
-	info["visuals_global_pos"] = null
-	info["overlay_present"] = false
-	info["overlay_texture_path"] = "<unset>"
-	info["overlay_visible"] = false
-	info["overlay_pos"] = null
-	info["overlay_layer_parent"] = "<none>"
-	info["visuals_node"] = visuals != null
-	if visuals:
-		info["visuals_texture_path"] = visuals.texture.resource_path if visuals.texture else "<null>"
-		info["visuals_texture_size"] = visuals.texture.get_size() if visuals.texture else Vector2.ZERO
-		info["visuals_visible"] = visuals.visible
-		info["visuals_scale"] = visuals.scale
-		info["visuals_modulate"] = visuals.modulate
-		info["visuals_z_index"] = visuals.z_index if visuals is CanvasItem else null
-		info["visuals_global_pos"] = visuals.global_position if visuals is Node2D else null
-	else:
-		info["visuals_texture_path"] = "<no_visuals_node>"
-
-	info["overlay_present"] = _overlay_sprite != null and is_instance_valid(_overlay_sprite)
-	if info["overlay_present"]:
-		info["overlay_texture_path"] = _overlay_sprite.texture.resource_path if _overlay_sprite.texture else "<null>"
-		info["overlay_visible"] = _overlay_sprite.visible
-		info["overlay_pos"] = _overlay_sprite.position
-		info["overlay_layer_parent"] = _overlay_layer.get_path() if _overlay_layer and is_instance_valid(_overlay_layer) else "<none>"
-	else:
-		info["overlay_texture_path"] = "<no_overlay>"
-
-	# parent chain summary for visuals
-	var parents = []
-	if visuals:
-		var p = visuals.get_parent()
-		while p:
-			parents.append(p.get_class() + ":" + p.name)
-			p = p.get_parent()
-	info["visuals_parent_chain"] = parents
-
-	# viewport/camera info
-	var vp = get_viewport()
-	if vp:
-		info["viewport_size"] = vp.get_visible_rect().size
-		var cam = vp.get_camera_2d()
-		info["camera_valid"] = is_instance_valid(cam)
-		if is_instance_valid(cam):
-			info["camera_global_pos"] = cam.global_position
-
-	# print concise summary for console
-	print("BlackHole debug: visuals=", info["visuals_node"], " tex=", info["visuals_texture_path"], " vis=", info["visuals_visible"], " scale=", info["visuals_scale"], " overlay=", info["overlay_present"], " overlay_vis=", info["overlay_visible"]) 
-
-	# Also show an on-screen debug overlay so mobile users (without Safari inspector) can see state
-	_show_render_debug_overlay(info)
-	# Ensure a prominent runtime overlay sprite is present and positioned (helps confirm rendering/occlusion)
-	_ensure_runtime_overlay_at_visuals()
-	return info
-
-
-func _ensure_runtime_overlay_at_visuals() -> void:
-	# Create or update a simple red marker Sprite2D at the black hole screen position to test visibility
-	if not visuals:
-		return
-	var vp = get_viewport()
-	if not vp:
-		return
-	var cam = vp.get_camera_2d()
-	# compute screen pos
-	var screen_pos = Vector2.ZERO
-	if is_instance_valid(cam):
-		var vp_transform: Transform2D = cam.get_viewport_transform()
-		screen_pos = vp_transform * visuals.global_position
-	else:
-		screen_pos = visuals.global_position
-	# create layer/sprite if missing
-		if not _overlay_layer or not is_instance_valid(_overlay_layer):
-			_overlay_layer = CanvasLayer.new()
-			_overlay_layer.name = "BlackHoleRuntimeOverlay"
-			# Force overlay CanvasLayer.layer to 100 so it sits above most UI layers on mobile
-			_overlay_layer.layer = max(100, int(_overlay_layer.layer))
-		if get_tree() and get_tree().root:
-			get_tree().root.call_deferred("add_child", _overlay_layer)
-		else:
-			call_deferred("_deferred_add_overlay_layer")
-	if not _overlay_sprite or not is_instance_valid(_overlay_sprite):
-		_overlay_sprite = Sprite2D.new()
-		_overlay_sprite.name = "BlackHoleRuntimeMarker"
-		_overlay_sprite.centered = true
-		_overlay_sprite.z_index = min(300000, Z_MAX)
-		_overlay_layer.add_child(_overlay_sprite)
-		# create a solid fluorescent green circle texture (no shader)
-		var size = 128
-		var img_marker = Image.create(size, size, false, Image.FORMAT_RGBA8)
-		for y in range(size):
-			for x in range(size):
-				var dx = x - size/2
-				var dy = y - size/2
-				var d = sqrt(dx*dx + dy*dy)
-				var alpha = 1.0 if d < size * 0.45 else 0.0
-				img_marker.set_pixel(x, y, Color(0, 1, 0, alpha))
-		var it_marker = ImageTexture.create_from_image(img_marker)
-		_overlay_sprite.texture = it_marker
-		_overlay_sprite.material = null
-	# ensure visible and prominent (force show + bright fluorescent green, larger scale)
-	_overlay_sprite.show()
-	_overlay_sprite.visible = true
-	_overlay_sprite.material = null
-	_overlay_sprite.modulate = Color(0.8, 1.0, 0.1, 1.0) # bright green-yellow
-	# force a larger scale so marker is unmistakable on mobile
-	var forced_scale = 2.0
-	_overlay_sprite.scale = Vector2.ONE * forced_scale
-	# ensure layer is above UI
-	if _overlay_layer and is_instance_valid(_overlay_layer):
-		_overlay_layer.layer = max(100, int(_overlay_layer.layer))
-	_overlay_sprite.position = screen_pos
-	# --- COORDINATE SYNC (force visuals to camera center for testing) ---
-	vp = get_viewport()
-	cam = vp.get_camera_2d() if vp else null
-	if visuals and is_instance_valid(visuals) and cam and is_instance_valid(cam):
-		# Remove shader dependency and force a visible texture
-		visuals.material = null
-		if not visuals.texture:
-			# assign placeholder if missing
-			var isz = 128
-			var img_placeholder = Image.create(isz, isz, false, Image.FORMAT_RGBA8)
-			for yy in range(isz):
-				for xx in range(isz):
-					img_placeholder.set_pixel(xx, yy, Color(0, 1, 0, 1))
-			var ph = ImageTexture.create_from_image(img_placeholder)
-			visuals.texture = ph
-		# Force visuals to camera center (world pos aligned with camera center)
-		visuals.global_position = cam.global_position
-		# Highlight visuals so it's unmistakable
-		visuals.modulate = Color(0, 1, 0, 1)
-		visuals.visible = true
-		visuals.scale = visuals.scale * 5.0
-		if visuals is CanvasItem:
-			visuals.z_index = min(4096, Z_MAX)
-		print("_ensure_runtime_overlay_at_visuals: placed runtime marker at ", screen_pos)
-
-
-func _show_render_debug_overlay(info: Dictionary) -> void:
-	# Create a temporary CanvasLayer + ColorRect + Label that shows the info for a few seconds
-	var root = get_tree().root
-	if not root:
-		return
-	# avoid duplicates
-	if root.has_node("BlackHoleDebugOverlayRoot"):
-		var existing = root.get_node("BlackHoleDebugOverlayRoot")
-		existing.queue_free()
-	# CanvasLayer
-	var layer = CanvasLayer.new()
-	layer.name = "BlackHoleDebugOverlayRoot"
-	layer.layer = 20001
-	# Panel (ColorRect) as background
-	var bg = ColorRect.new()
-	bg.name = "BlackHoleDebugBG"
-	bg.color = Color(0, 0, 0, 0.6)
-	bg.anchor_left = 0.0
-	bg.anchor_top = 0.0
-	bg.anchor_right = 1.0
-	bg.anchor_bottom = 1.0
-	# Label (fill the bg; use min size for padding)
-	var lbl = Label.new()
-	lbl.name = "BlackHoleDebugLabel"
-	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	lbl.anchor_left = 0.0
-	lbl.anchor_top = 0.0
-	lbl.anchor_right = 1.0
-	lbl.anchor_bottom = 1.0
-	lbl.custom_minimum_size = Vector2(220, 96)
-	# Compose debug text
-	var lines: Array = []
-	for k in info.keys():
-		lines.append(str(k) + ": " + str(info[k]))
-	lbl.text = "\n".join(lines)
-	bg.call_deferred("add_child", lbl)
-	layer.call_deferred("add_child", bg)
-	root.call_deferred("add_child", layer)
-	# remove after timeout
-	var t = Timer.new()
-	t.one_shot = true
-	t.wait_time = 8.0
-	t.name = "BlackHoleDebugOverlayRemover"
-	# Add deferred then autostart so Timer begins when added to the scene tree
-	layer.call_deferred("add_child", t)
-	t.connect("timeout", Callable(self, "_remove_render_debug_overlay"))
-	t.autostart = true
-	print("_show_render_debug_overlay: displayed on-screen debug overlay")
-
-
-func _remove_render_debug_overlay() -> void:
-	var root = get_tree().root
-	if not root:
-		return
-	if root.has_node("BlackHoleDebugOverlayRoot"):
-		var n = root.get_node("BlackHoleDebugOverlayRoot")
-		n.queue_free()
-		print("_remove_render_debug_overlay: removed overlay")
-
-
-func _start_overlay_blink_test() -> void:
-	# 如果沒有 overlay 則不做事
-	if not _overlay_sprite or not is_instance_valid(_overlay_sprite):
-		print("_start_overlay_blink_test: no overlay sprite present")
-		return
-	print("_start_overlay_blink_test: starting blink test (will toggle once per second). Overlay sprite:", _overlay_sprite)
-	# 強制放到畫面中央並每秒閃爍，方便在瀏覽器上觀察
-	var vp = get_viewport()
-	if not vp:
-		print("_start_overlay_blink_test: no viewport")
-		return
-	# position to viewport center
-	var center = vp.get_visible_rect().size * 0.5
-	_overlay_sprite.position = center
-	_overlay_sprite.centered = true
-	_overlay_sprite.modulate = Color(1, 0.4, 0.4, 1)
-	# 簡單閃爍計時器
-	var t = Timer.new()
-	t.wait_time = 1.0
-	t.autostart = true
-	t.one_shot = false
-	t.name = "BlackHoleOverlayBlinkTimer"
-	add_child(t)
-	t.connect("timeout", Callable(self, "_on_overlay_blink_timeout"))
-	print("_start_overlay_blink_test: blink timer started")
-
-
-func _on_overlay_blink_timeout() -> void:
-	if not _overlay_sprite or not is_instance_valid(_overlay_sprite):
-		return
-	_overlay_sprite.visible = not _overlay_sprite.visible
-	# keep it centered every tick (in case camera/viewport changes)
-	var vp = get_viewport()
-	if vp:
-		_overlay_sprite.position = vp.get_visible_rect().size * 0.5
-	print("_on_overlay_blink_timeout: overlay visible=", _overlay_sprite.visible)
-
-
-func _scan_for_fullscreen_overlays() -> void:
-	# 列出 root 下可疑會遮蔽整個畫布的節點（CanvasLayer / Control / ColorRect）
-	var root = get_tree().root
-	print("_scan_for_fullscreen_overlays: scanning root children (count=", root.get_child_count(), ")")
-	for i in range(root.get_child_count()):
-		var c = root.get_child(i)
-		var info = c.get_class() + " (name=" + c.name + ")"
-		# CanvasLayer
-		if c is CanvasLayer:
-			info += " [CanvasLayer layer=" + str(c.layer) + "]"
-		# Controls: report rect sizes
-		if c is Control:
-			var rs = c.rect_size if c.has_method("get_rect") else Vector2.ZERO
-			info += " [Control rect_size=" + str(rs) + "]"
-		# Search descendants for ColorRect or full-screen TextureRect
-		for d in c.get_children():
-			if d is ColorRect:
-				var col = d as ColorRect
-				info += " => contains ColorRect (color=" + str(col.color) + ")"
-			elif d is TextureRect:
-				info += " => contains TextureRect"
-		print("_scan_for_fullscreen_overlays: ", info)
-	# also list CanvasLayer order across scene tree
-	var all_layers = []
-	# iterative traversal to avoid nested-function/closure parser issues
-	var stack = [root]
-	while stack.size() > 0:
-		var n = stack.pop_back()
-		if n is CanvasLayer:
-			all_layers.append({"name": n.name, "layer": n.layer, "path": n.get_path()})
-		for ch in n.get_children():
-			stack.append(ch)
-	print("_scan_for_fullscreen_overlays: found CanvasLayers =", all_layers)
-
-
-func _create_global_fullscreen_test() -> void:
-	# Create a high-layer CanvasLayer with a full-size Control + ColorRect that briefly flashes.
-	var root = get_tree().root
-	if not root:
-		print("_create_global_fullscreen_test: no root available")
-		return
-	# avoid duplicates
-	if root.has_node("BlackHoleGlobalTestRoot"):
-		print("_create_global_fullscreen_test: test node already exists")
-		return
-	var layer = CanvasLayer.new()
-	layer.name = "BlackHoleGlobalTestRoot"
-	layer.layer = 10001
-	# control fills viewport
-	var ctrl = Control.new()
-	ctrl.name = "GlobalTestControl"
-	# Use anchors preset to avoid setting margins directly (avoids Godot4 property issues)
-	ctrl.set_anchors_preset(Control.PRESET_FULL_RECT)
-	# color rect child
-	var cr = ColorRect.new()
-	cr.name = "GlobalTestColor"
-	cr.color = Color(1, 0.1, 0.1, 0.85)
-	cr.set_anchors_preset(Control.PRESET_FULL_RECT)
-	# Add children deferred to avoid 'Parent node is busy setting up children' errors
-	ctrl.call_deferred("add_child", cr)
-	layer.call_deferred("add_child", ctrl)
-	root.call_deferred("add_child", layer)
-	print("_create_global_fullscreen_test: added test layer (will remove in 6s). Layer=", layer)
-	# remove after a short delay so it doesn't interfere with gameplay; keep it long enough for screenshot/observation
-	var t = Timer.new()
-	t.one_shot = true
-	t.wait_time = 6.0
-	t.name = "BlackHoleGlobalTestRemover"
-	layer.call_deferred("add_child", t)
-	t.connect("timeout", Callable(self, "_remove_global_fullscreen_test"))
-	t.autostart = true
 
 
 func _apply_fullscreen_material_defaults() -> void:
@@ -780,16 +436,7 @@ func set_fullscreen_params(radius: float, strength: float, speed: float, tint: C
 		_full_set_param(full_screen_distort_material, ["tint_color", "color", "distort_tint"], tint)
 
 
-func _remove_global_fullscreen_test() -> void:
-	var root = get_tree().root
-	if not root:
-		return
-	if root.has_node("BlackHoleGlobalTestRoot"):
-		var n = root.get_node("BlackHoleGlobalTestRoot")
-		n.queue_free()
-		print("_remove_global_fullscreen_test: removed test node")
-
-func _process(delta): 
+func _process(delta):
 	if full_screen_distort_material and not fullscreen_distort_enabled:
 		disable_fullscreen_distort()
 	elif full_screen_distort_material:
@@ -804,8 +451,13 @@ func _process(delta):
 				var real_center_uv = screen_position_px / viewport_size
 				full_screen_distort_material.set_shader_parameter("center_uv", real_center_uv)
 
-			# 2. 動態調整漣漪參數
-			if current_level >= distort_start_level:
+			# 2. 動態調整漣漪參數（只在 level/stability/fever 狀態變化時更新）
+			var _shader_dirty: bool = (current_level != _prev_shader_level) or (absf(current_stability - _prev_shader_stability) > 0.5) or (fever_active != _prev_shader_fever)
+			if _shader_dirty:
+				_prev_shader_level = current_level
+				_prev_shader_stability = current_stability
+				_prev_shader_fever = fever_active
+			if current_level >= distort_start_level and _shader_dirty:
 				var progress = float(current_level - distort_start_level) / (max_level - distort_start_level)
 				progress = clamp(progress, 0.0, 1.0)
 				
@@ -814,7 +466,7 @@ func _process(delta):
 				
 				# A. 速度修正：【僅依等級成長】
 				#    速度從基礎值 (0.5) 緩慢成長到最大速度 (max_distort_speed)
-				var target_speed = lerp(0.5, max_distort_speed, progress)
+				var target_speed = lerp(0.15, max_distort_speed, progress)
 				
 				# B. 半徑修正：【僅依等級成長】(滿足你的需求)
 				#    半徑從 0.0 成長到 max_distort_radius (通常為 1.0，即全螢幕)
@@ -907,28 +559,6 @@ func _process(delta):
 	_update_instability_visuals() # 處理色差和輝光閃爍 (更新 Shader: aberration)
 	_update_size_by_stability(delta) # 根據穩定度平滑調整大小 (更新 Shader: radius)
 
-	# Overlay sprite sync (if overlay sprite exists)
-	if _overlay_sprite and is_instance_valid(_overlay_sprite):
-		# Use camera viewport transform to convert world -> screen coordinates for correct placement
-		var vp = get_viewport()
-		var cam = vp.get_camera_2d()
-		if cam:
-			var vp_transform: Transform2D = cam.get_viewport_transform()
-			var screen_pos = vp_transform * global_position
-			_overlay_sprite.position = screen_pos
-			# Adjust overlay scale to account for camera zoom
-			var zoom_scale: float = 1.0
-			zoom_scale = 1.0 / max(0.001, min(cam.zoom.x, cam.zoom.y))
-			var visual_scale = visuals.scale if visuals else Vector2.ONE * base_visual_scale
-			_overlay_sprite.scale = visual_scale * zoom_scale
-		else:
-			# Fallback: use viewport center so we can at least see the overlay for diagnostics
-			var vsz = vp.get_visible_rect().size
-			_overlay_sprite.position = vsz * 0.5
-			_overlay_sprite.scale = Vector2.ONE * base_visual_scale
-		# Sync modulate and ensure visibility
-		_overlay_sprite.modulate = visuals.modulate if visuals else Color(1,1,1,1)
-		_overlay_sprite.visible = true
 func _physics_process(delta):
 	apply_pull(delta)
 	_update_fever(delta)
@@ -947,6 +577,9 @@ func start_fever(duration_sec: float = -1.0) -> void:
 	var d: float = duration_sec
 	if d <= 0.0:
 		d = fever_duration_sec
+	# Roguelike: fever_duration_bonus modifier
+	if has_node("/root/RoguelikeUpgradeManager"):
+		d += get_node("/root/RoguelikeUpgradeManager").get_modifier("fever_duration_bonus")
 	fever_active = true
 	_fever_time_left = d
 	_fever_absorb_accum = 0.0
@@ -1067,24 +700,6 @@ func _absorb_overlapping_enemies_for_fever() -> void:
 			continue
 		_swallow_body(n)
 
-
-func _absorb_projectiles_for_fever() -> void:
-	# Fever：持續吸掉附近子彈（最有感）
-	var r: float = maxf(120.0, fever_projectile_absorb_radius)
-	for p in get_tree().get_nodes_in_group("EnemyProjectiles"):
-		if not is_instance_valid(p):
-			continue
-		if not (p is Node2D):
-			continue
-		var n2: Node2D = p as Node2D
-		if n2.global_position.distance_to(global_position) > r:
-			continue
-		# 若主場景支援回收，就走回收；否則直接 free
-		if p.has_method("_recycle"):
-			p.call("_recycle")
-		else:
-			p.queue_free()
-
 # ----------------------------------------------------
 # 核心吞噬與成長邏輯
 # ----------------------------------------------------
@@ -1145,11 +760,23 @@ func _swallow_body(body: Node2D):
 		_play_swallow_particles(pos_obj)
 		return
 
+	# 【Boss 特殊處理：造成吞噬傷害但不消滅】
+	if body.has_method("is_boss") and body.is_boss():
+		var pull_dmg: float = GameConfig.BOSS_PULL_DAMAGE_PER_HIT
+		if fever_active:
+			pull_dmg *= 2.0 # Fever 期間雙倍傷害
+		if body.has_method("take_pull_damage"):
+			body.call("take_pull_damage", pull_dmg)
+		_play_swallow_particles(body.global_position)
+		swallowed_feedback.emit(pull_dmg * 0.3)
+		_bounce_on_swallow(pull_dmg * 0.3)
+		return # Boss 不被消滅，由其自身 HP 管理死亡
+
 	# 【第一步：檢查是否為敵人】
 	if body.has_method("is_enemy") and body.is_enemy():
 		if not fever_active:
 			# 敵人對黑洞核心造成破壞 (扣除大量穩定度)
-			var damage = 30.0 # 每次碰撞扣 30 點穩定度
+			var damage = ENEMY_CONTACT_DAMAGE
 			apply_damage(damage) # 使用統一的傷害接收函式
 			# 敵人自我銷毀
 			body.queue_free()
@@ -1157,19 +784,24 @@ func _swallow_body(body: Node2D):
 				bodies_in_range.erase(body)
 			return # 處理完敵人，立即退出函式
 		# Fever：視為可吞噬目標（給分 + 回復穩定度）
-		var enemy_gain: float = 18.0
+		var enemy_gain: float = FEVER_ENEMY_STABILITY_GAIN
 		if body.has_method("get_score_value"):
 			enemy_gain = float(body.get_score_value())
 		var score_gain_enemy: int = int(round(enemy_gain * fever_enemy_score_multiplier))
 		_extend_fever_from_enemy()
 		_fever_enemy_combo_count += 1
-		current_stability = min(current_stability + enemy_gain, max_stability)
+		# Roguelike: enemy_swallow_heal bonus
+		var enemy_heal_bonus: float = 0.0
+		if has_node("/root/RoguelikeUpgradeManager"):
+			enemy_heal_bonus = get_node("/root/RoguelikeUpgradeManager").get_modifier("enemy_swallow_heal")
+		current_stability = min(current_stability + enemy_gain + enemy_heal_bonus, max_stability)
 		stability_changed.emit(current_stability, max_stability)
 		var pos_enemy: Vector2 = body.global_position
 		body.queue_free()
 		if body in bodies_in_range:
 			bodies_in_range.erase(body)
 		object_swallowed.emit(score_gain_enemy)
+		enemy_killed.emit()
 		fever_enemy_combo.emit(_fever_enemy_combo_count, pos_enemy)
 		swallowed_feedback.emit(enemy_gain)
 		_bounce_on_swallow(enemy_gain)
@@ -1183,6 +815,12 @@ func _swallow_body(body: Node2D):
 	var energy_gain = 5.0 
 	if body.has_method("get_score_value"):
 		energy_gain = body.get_score_value() * 1.0
+	# 寶藏哥布林：額外穩定度回復
+	if body.has_method("get_stability_bonus"):
+		var bonus: float = float(body.get_stability_bonus())
+		if bonus > 0.0:
+			current_stability = minf(current_stability + bonus, max_stability)
+			stability_changed.emit(current_stability, max_stability)
 	var overload_active: bool = _is_overload_active()
 	var score_mult: float = overload_score_multiplier if overload_active else 1.0
 	var score_gain: int = int(round(energy_gain * score_mult))
@@ -1193,10 +831,16 @@ func _swallow_body(body: Node2D):
 			powerup_collected.emit(t)
 	# 依照能量值換算「成長分數」：大物體推進成長更明顯
 	# 玩家回饋：吃東西成長太快 -> 降低換算與上限
-	var growth_points: int = int(round(energy_gain / 22.0))
+	var growth_points: int = int(round(energy_gain / GROWTH_ENERGY_DIVISOR))
 	growth_points = clamp(growth_points, 1, 3)
 	
-	current_stability += energy_gain
+	# Roguelike: swallow_heal bonus healing per swallow
+	var bonus_heal: float = 0.0
+	if has_node("/root/RoguelikeUpgradeManager"):
+		var rum = get_node("/root/RoguelikeUpgradeManager")
+		bonus_heal = rum.get_modifier("swallow_heal")
+		rum.notify_swallow()
+	current_stability += energy_gain + bonus_heal
 	current_stability = min(current_stability, max_stability) 
 	stability_changed.emit(current_stability, max_stability)
 	
@@ -1233,6 +877,12 @@ func _swallow_body(body: Node2D):
 	#
 	max_pull_radius = min(max_pull_radius, final_max_radius)
 	kill_radius = base_kill_radius
+	# Roguelike: kill_radius_mult & pull_radius_mult modifiers
+	if has_node("/root/RoguelikeUpgradeManager"):
+		var rum = get_node("/root/RoguelikeUpgradeManager")
+		kill_radius *= rum.get_multiplier("kill_radius_mult")
+		max_pull_radius *= rum.get_multiplier("pull_radius_mult")
+		max_pull_radius = min(max_pull_radius, final_max_radius)
 	#kill_radius = min(kill_radius, final_max_radius * 0.35)
 	
 	_update_collision_and_visuals()
@@ -1241,13 +891,39 @@ func _swallow_body(body: Node2D):
 # ----------------------------------------------------
 # 傷害與死亡邏輯
 # ----------------------------------------------------
+var _shield_active: bool = false
+var _shield_tween: Tween = null
+
+func set_shield_active(active: bool) -> void:
+	_shield_active = active
+	if _shield_tween and _shield_tween.is_valid():
+		_shield_tween.kill()
+		_shield_tween = null
+	if active:
+		# Looping cyan pulse to indicate shield
+		_shield_tween = create_tween().set_loops()
+		_shield_tween.tween_property(self, "modulate", Color(0.4, 0.8, 1.0, 1.0), 0.5)
+		_shield_tween.tween_property(self, "modulate", Color(1.0, 1.0, 1.0, 1.0), 0.5)
+	else:
+		modulate = Color(1.0, 1.0, 1.0, 1.0)
+
+func is_shield_active() -> bool:
+	return _shield_active
 
 # 當被敵人射擊或近戰撞擊時呼叫 (統一的傷害接收介面)
 func apply_damage(amount: float, show_feedback: bool = true):
+	# Shield: full immunity (no stability loss)
+	if _shield_active:
+		return
 	# Fever：無敵（不扣穩定度，不紅閃）
 	if fever_active:
 		return
-	current_stability = max(0.0, current_stability - amount)
+	# Roguelike: damage_reduction modifier
+	var actual_amount := amount
+	if has_node("/root/RoguelikeUpgradeManager"):
+		var dr: float = get_node("/root/RoguelikeUpgradeManager").get_modifier("damage_reduction")
+		actual_amount = maxf(0.0, amount * (1.0 - clampf(dr, 0.0, 0.8)))
+	current_stability = max(0.0, current_stability - actual_amount)
 	stability_changed.emit(current_stability, max_stability)
 	# 只有真正「受傷」才做紅閃/震動；衝刺消耗穩定度屬於自損成本，不該一直干擾畫面
 	if show_feedback and amount > 0.0:
@@ -1275,7 +951,14 @@ func _on_entropy_death():
 func _handle_entropy_decay(delta):
 	var level_penalty = 1.0 + (current_level * decay_level_scale)
 	level_penalty = min(level_penalty, 2.6)
-	var actual_decay = base_decay_rate * level_penalty * delta
+	# Roguelike: decay_rate_mult modifier (negative = slower decay)
+	var decay_mult: float = 1.0
+	if has_node("/root/RoguelikeUpgradeManager"):
+		decay_mult = maxf(0.05, get_node("/root/RoguelikeUpgradeManager").get_multiplier("decay_rate_mult"))
+		# Fever no-decay evolution
+		if fever_active and get_node("/root/RoguelikeUpgradeManager").get_modifier("fever_no_decay") > 0.0:
+			decay_mult = 0.0
+	var actual_decay = base_decay_rate * level_penalty * decay_mult * delta
 	
 	current_stability -= actual_decay
 	current_stability = max(current_stability, 0.0)
@@ -1348,7 +1031,11 @@ func _consume_stability(cost: float) -> bool:
 
 func trigger_shockwave() -> bool:
 	# 主動釋放 entropy：消耗穩定度推開/震暈周圍敵人與子彈
-	if not _consume_stability(shockwave_stability_cost):
+	# Roguelike: shockwave_cost_mult modifier (negative = cheaper)
+	var cost: float = shockwave_stability_cost
+	if has_node("/root/RoguelikeUpgradeManager"):
+		cost *= maxf(0.0, get_node("/root/RoguelikeUpgradeManager").get_multiplier("shockwave_cost_mult"))
+	if not _consume_stability(cost):
 		return false
 	var r: float = maxf(50.0, shockwave_radius)
 	var intensity: float = clampf(r / 600.0, 0.4, 1.0)
@@ -1368,6 +1055,9 @@ func trigger_shockwave() -> bool:
 		var dir: Vector2 = (to_n / d) if d > 0.001 else Vector2.RIGHT
 		# 推開（更明顯，讓玩家覺得有放大招）
 		n.global_position += dir * (140.0 + (r - d) * 0.35)
+		# Boss 受衝擊波傷害
+		if e.has_method("is_boss") and e.is_boss() and e.has_method("take_shockwave_damage"):
+			e.call("take_shockwave_damage", GameConfig.BOSS_PULL_DAMAGE_PER_HIT * 1.5)
 		# 短暫暈眩（若支援）
 		if e.has_method("set_frozen"):
 			e.call("set_frozen", true)
@@ -1513,6 +1203,9 @@ func _update_shader_params():
 		# 玩家回饋：後期吸得太猛/節奏太快 -> 降低每級增幅
 		var force_per_level = 140.0 
 		pull_strength = base_force + (current_level - 1) * force_per_level
+		# Roguelike: pull_strength_mult modifier
+		if has_node("/root/RoguelikeUpgradeManager"):
+			pull_strength *= get_node("/root/RoguelikeUpgradeManager").get_multiplier("pull_strength_mult")
 		
 		# 將拉取半徑轉換為 UV 座標；避免半徑過大導致整張 Sprite 變成方塊
 		black_hole_material.set_shader_parameter("radius", _calc_shader_radius_uv(_get_current_radius()))
@@ -1525,6 +1218,47 @@ func _update_shader_params():
 		if current_level > 15:
 			red_intensity = lerp(0.0, 1.2, float(current_level - 15) / (max_level - 15))
 		black_hole_material.set_shader_parameter("tint_intensity", red_intensity)
+		
+		# 視覺進化等級 (Phase 4B)
+		_update_visual_tier()
+
+# 視覺進化：根據等級改變邊緣光暈/色差/粒子
+func _update_visual_tier() -> void:
+	if not black_hole_material:
+		return
+	# Tier 1: Lv 1-5  → 無額外效果
+	# Tier 2: Lv 6-10 → 紫/青光暈 + 輕微色差增強
+	# Tier 3: Lv 11+  → 金色光暈 + 強色差 + 粒子加強
+	var rim_col := Vector3(0.0, 0.0, 0.0)
+	var rim_int: float = 0.0
+	var aberr: float = 0.02
+	
+	if current_level >= 11:
+		# Tier 3: 金色/橙色（像吸積盤）
+		var t3: float = clampf(float(current_level - 11) / 10.0, 0.0, 1.0)
+		rim_col = Vector3(1.0, 0.7 + t3 * 0.15, 0.15 + t3 * 0.1)
+		rim_int = lerpf(0.35, 0.7, t3)
+		aberr = lerpf(0.04, 0.08, t3)
+		# 粒子加速
+		if glitch_particles and glitch_particles is CPUParticles2D:
+			glitch_particles.speed_scale = lerpf(1.2, 1.8, t3)
+			glitch_particles.amount = clampi(int(lerpf(20.0, 40.0, t3)), 8, 60)
+	elif current_level >= 6:
+		# Tier 2: 紫/青
+		var t2: float = clampf(float(current_level - 6) / 5.0, 0.0, 1.0)
+		rim_col = Vector3(0.5 + t2 * 0.2, 0.3, 1.0)
+		rim_int = lerpf(0.15, 0.35, t2)
+		aberr = lerpf(0.025, 0.04, t2)
+		if glitch_particles and glitch_particles is CPUParticles2D:
+			glitch_particles.speed_scale = lerpf(1.0, 1.2, t2)
+	else:
+		# Tier 1: 預設
+		if glitch_particles and glitch_particles is CPUParticles2D:
+			glitch_particles.speed_scale = 1.0
+	
+	black_hole_material.set_shader_parameter("rim_color", rim_col)
+	black_hole_material.set_shader_parameter("rim_intensity", rim_int)
+	black_hole_material.set_shader_parameter("aberration", aberr)
 
 # 更新 Shader 中心點
 func update_shader_position(_delta: float = 0.0):
@@ -1579,8 +1313,8 @@ func _bounce_on_swallow(energy_gain: float) -> void:
 	# 小果凍彈跳：吞越大，彈越明顯
 	var k: float = clampf(energy_gain / 40.0, 0.12, swallow_bounce_max_k)
 	# Gradually damp bounce as level rises, even before the hard disable.
-	var lv_from: int = max(swallow_bounce_min_level, 1)
-	var lv_to: int = max(swallow_bounce_disable_level, lv_from + 1)
+	var lv_from: int = maxi(swallow_bounce_min_level, 1)
+	var lv_to: int = maxi(swallow_bounce_disable_level, lv_from + 1)
 	var damp: float = 1.0 - clampf(float(current_level - lv_from) / float(lv_to - lv_from), 0.0, 1.0)
 	k *= lerpf(0.25, 1.0, damp)
 	var from_scale: Vector2 = visuals.scale
@@ -1602,11 +1336,3 @@ func _on_black_hole_body_entered(body):
 func _on_black_hole_body_exited(body):
 	if body in bodies_in_range:
 		bodies_in_range.erase(body)
-
-
-func _deferred_add_overlay_layer() -> void:
-	if _overlay_layer and get_tree() and get_tree().root:
-		get_tree().root.call_deferred("add_child", _overlay_layer)
-		print("Deferred: added BlackHoleOverlayLayer to tree root")
-	else:
-		print("Deferred: failed to add overlay layer (missing root or layer)")

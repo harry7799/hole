@@ -1,0 +1,19 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://Scenes/LootGoblin.gd" id="1_loot"]
+[ext_resource type="Texture2D" uid="uid://o5jchgy4kr0b" path="res://Shaders/發光的星星.png" id="2_star"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_loot"]
+radius = 60.0
+
+[node name="LootGoblin" type="RigidBody2D" groups=["Prey", "Swallowables", "LootGoblins"]]
+gravity_scale = 0.0
+script = ExtResource("1_loot")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("CircleShape2D_loot")
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+modulate = Color(1, 0.85, 0.2, 1)
+scale = Vector2(1.8, 1.8)
+texture = ExtResource("2_star")

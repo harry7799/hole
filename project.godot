@@ -17,7 +17,12 @@ config/icon="res://icon.svg"
 
 [autoload]
 
+GameConfig="*res://Scripts/GameConfig.gd"
+MetaManager="*res://Scripts/MetaManager.gd"
+Events="*res://Scripts/Events.gd"
 GachaManager="*res://Scripts/GachaManager.gd"
+MissionManager="*res://Scripts/MissionManager.gd"
+RoguelikeUpgradeManager="*res://Scripts/RoguelikeUpgradeManager.gd"
 
 [display]
 

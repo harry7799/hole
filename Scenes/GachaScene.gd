@@ -737,8 +737,9 @@ func _distribute_amounts(list: Array[GPUParticles2D], total: int) -> void:
 	if list.is_empty():
 		return
 	var n := list.size()
-	var base := int(total / n)
-	var rem := int(total - base * n)
+	@warning_ignore("integer_division")
+	var base := total / n
+	var rem := total - base * n
 	for i in range(n):
 		var v := base + (1 if i < rem else 0)
 		list[i].amount = max(1, v)
