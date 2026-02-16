@@ -118,6 +118,10 @@ var _boss_hp_container: PanelContainer = null
 var _boss_hp_bar: ProgressBar = null
 var _boss_hp_label: Label = null
 
+# 地圖事件系統
+var _map_event_manager: MapEventManager = null
+var _map_event_label: Label = null
+
 # 任務系統 UI（嵌入設定視窗）
 var _mission_items: Array[Dictionary] = []  # [{label: Label, bar: ProgressBar, id: String}]
 var _run_enemies_killed: int = 0
@@ -2906,6 +2910,9 @@ func _enter_main_menu() -> void:
 			main_menu.call("raise")
 		print("_enter_main_menu: main_menu shown; z_index=", (main_menu.z_index if main_menu is CanvasItem else "N/A"))
 
+	# 停止地圖事件
+	_stop_map_event()
+
 	# 停止生成與玩家控制/黑洞處理
 	if _spawn_mgr:
 		_spawn_mgr.stop_timers()
@@ -3071,6 +3078,9 @@ func _start_game() -> void:
 		_spawn_mgr.start_timers()
 	_refresh_music_by_state()
 
+	# ---- 地圖事件系統 ----
+	_start_map_event_for_current()
+
 
 
 func _start_campaign_if_needed() -> void:
@@ -3106,6 +3116,76 @@ func _bind_campaign_map_and_music() -> void:
 		_campaign_forced_music_stream = load(music_path) as AudioStream
 	# Ensure music updates to the forced campaign track.
 	_refresh_music_by_state()
+
+
+# ============================================================
+# 地圖事件系統
+# ============================================================
+func _start_map_event_for_current() -> void:
+	if not _map_event_manager:
+		_map_event_manager = MapEventManager.new()
+		_map_event_manager.name = "MapEventManager"
+		add_child(_map_event_manager)
+
+	# 決定實際地圖 ID
+	var map_id: String = ""
+	if game_mode == GameMode.CAMPAIGN:
+		# 從關卡定義推導地圖 ID
+		var def := _get_campaign_level_def(campaign_level_id)
+		var map_path: String = String(def.get("map_path", ""))
+		if map_path != "":
+			map_id = map_path.get_file().to_lower().get_basename()
+	else:
+		map_id = meta_selected_map
+
+	var player_ctrl: Node = get_node_or_null("PlayerController")
+	_map_event_manager.start_map_event(map_id, self, %BlackHole, player_ctrl, _spawn_mgr, camera)
+
+	# HUD 指示器
+	_update_map_event_hud()
+
+
+func _stop_map_event() -> void:
+	if _map_event_manager:
+		_map_event_manager.stop_map_event()
+	if _map_event_label and is_instance_valid(_map_event_label):
+		_map_event_label.text = ""
+		_map_event_label.visible = false
+
+
+func _update_map_event_hud() -> void:
+	if not _map_event_manager or not _map_event_manager.has_active_event():
+		if _map_event_label and is_instance_valid(_map_event_label):
+			_map_event_label.visible = false
+		return
+
+	var ev: MapEventBase = _map_event_manager.get_current_event()
+	if not ev:
+		return
+
+	# 第一次建立 label
+	if not _map_event_label or not is_instance_valid(_map_event_label):
+		_map_event_label = Label.new()
+		_map_event_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		_map_event_label.add_theme_font_size_override("font_size", 16)
+		_map_event_label.add_theme_color_override("font_color", Color(1, 1, 0.8, 0.85))
+		_map_event_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.7))
+		_map_event_label.add_theme_constant_override("shadow_offset_x", 1)
+		_map_event_label.add_theme_constant_override("shadow_offset_y", 1)
+		_map_event_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		if hud:
+			hud.add_child(_map_event_label)
+			_map_event_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
+			_map_event_label.position.y = 50
+
+	_map_event_label.text = "%s：%s" % [ev.get_event_name(), ev.get_event_description()]
+	_map_event_label.visible = true
+
+	# 3 秒後淡出提示
+	if _map_event_label:
+		var tw := create_tween()
+		tw.tween_interval(3.0)
+		tw.tween_property(_map_event_label, "modulate:a", 0.0, 1.5)
 
 
 func _reset_feedback_overlays_for_menu() -> void:
@@ -3564,6 +3644,7 @@ func _show_campaign_clear() -> void:
 	# Stop spawning and player control while the dialog is open.
 	if _spawn_mgr:
 		_spawn_mgr.stop_timers()
+	_stop_map_event()
 	var player_controller = get_node_or_null("PlayerController")
 	if player_controller:
 		player_controller.set_physics_process(false)
@@ -3690,6 +3771,10 @@ func _process(delta):
 
 	# Timer + wanted progression must update every frame.
 	_update_timer_and_wanted(delta)
+
+	# 地圖事件 process
+	if _map_event_manager:
+		_map_event_manager.process_event(delta)
 
 	# Campaign win checks that are not tied to a single signal.
 	if game_mode == GameMode.CAMPAIGN:
@@ -4102,6 +4187,9 @@ func _update_timer_and_wanted(delta: float) -> void:
 func _physics_process(delta):
 	if not game_started or is_game_over:
 		return
+	# 地圖事件 physics process
+	if _map_event_manager:
+		_map_event_manager.physics_process_event(delta)
 	# Campaign: vortex current (enabled after Lv.7 milestone)
 	if game_mode == GameMode.CAMPAIGN and _campaign_vortex_enabled:
 		_apply_campaign_vortex(delta)
@@ -4999,7 +5087,10 @@ func _game_over(reason: String):
 	
 	if _spawn_mgr:
 		_spawn_mgr.stop_timers()
-	
+
+	# 停止地圖事件
+	_stop_map_event()
+
 	# 清理 EMP 按鈕的 Tween 效果
 	if emp_button_tween and emp_button_tween.is_valid():
 		emp_button_tween.kill()
