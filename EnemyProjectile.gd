@@ -5,6 +5,8 @@ extends Area2D
 
 var velocity: Vector2 = Vector2.ZERO
 
+const DIRECTION_EPSILON_SQUARED := 0.0001
+
 # The black hole's gravity Area2D is large; we only apply damage near the core.
 var _pending_hit_target: Node2D = null
 
@@ -14,9 +16,10 @@ var _pending_hit_target: Node2D = null
 
 func setup_for_spawn(pos: Vector2, vel: Vector2, spd: float, dmg: float, tex: Texture2D) -> void:
 	global_position = pos
-	velocity = vel
+	set_motion(vel)
 	speed = spd
 	damage = dmg
+	_pending_hit_target = null
 	if _sprite and tex:
 		_sprite.texture = tex
 	visible = true
@@ -25,6 +28,17 @@ func setup_for_spawn(pos: Vector2, vel: Vector2, spd: float, dmg: float, tex: Te
 	monitoring = true
 	monitorable = true
 	_recalc_and_start_lifetime()
+
+
+func set_motion(new_velocity: Vector2) -> void:
+	velocity = new_velocity
+	_sync_rotation_to_velocity()
+
+
+func _sync_rotation_to_velocity() -> void:
+	if velocity.length_squared() > DIRECTION_EPSILON_SQUARED:
+		# Projectile art is authored nose-first along local +X.
+		global_rotation = velocity.angle()
 
 
 func _recalc_and_start_lifetime() -> void:
@@ -56,28 +70,37 @@ func _ready():
 	_recalc_and_start_lifetime()
 
 func _physics_process(delta):
+	_sync_rotation_to_velocity()
+	# Poll the core directly. The black hole's pull Area is intentionally huge,
+	# so area_entered can fire once far away or be missed by pooled projectiles.
+	if _try_apply_core_damage():
+		return
 	global_position += velocity * delta
 	_try_apply_core_damage()
 
 
-func _try_apply_core_damage() -> void:
+func _try_apply_core_damage() -> bool:
 	if not _pending_hit_target or not is_instance_valid(_pending_hit_target):
-		_pending_hit_target = null
-		return
+		_pending_hit_target = get_tree().get_first_node_in_group("Player") as Node2D
+		if not is_instance_valid(_pending_hit_target):
+			_pending_hit_target = null
+			return false
 	var r: float = 140.0
 	if _pending_hit_target.has_method("get_damage_radius"):
 		r = float(_pending_hit_target.call("get_damage_radius"))
 	var d: float = global_position.distance_to(_pending_hit_target.global_position)
-	if d <= r:
-		# Fever: no damage, but still disappears on contact.
-		if _pending_hit_target.has_method("is_fever_active") and bool(_pending_hit_target.call("is_fever_active")):
-			_pending_hit_target = null
-			_recycle()
-			return
-		if _pending_hit_target.has_method("apply_damage"):
-			_pending_hit_target.apply_damage(damage)
+	if d > r:
+		return false
+	# Fever: no damage, but the projectile is absorbed at the actual core.
+	if _pending_hit_target.has_method("is_fever_active") and bool(_pending_hit_target.call("is_fever_active")):
 		_pending_hit_target = null
 		_recycle()
+		return true
+	if _pending_hit_target.has_method("apply_damage"):
+		_pending_hit_target.apply_damage(damage)
+	_pending_hit_target = null
+	_recycle()
+	return true
 
 # 訊號：當撞到物體時
 func _on_body_entered(body):
@@ -120,6 +143,7 @@ func _on_lifetime_timer_timeout() -> void:
 
 
 func _recycle() -> void:
+	_pending_hit_target = null
 	# 若主場景支援物件池，就回收；否則照舊 queue_free
 	var main = get_tree().get_current_scene()
 	if main and main.has_method("recycle_enemy_projectile"):

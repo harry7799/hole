@@ -415,6 +415,8 @@ var _idle_rewards_claim_button: Button = null
 
 var _fever_combo_count: int = 0
 var _fever_combo_last_sec: float = -9999.0
+var _fever_time_left: float = 0.0
+var _fever_duration: float = 8.0
 
 # -----------------------------
 # Swallow Combo（連吞得分倍率）
@@ -2840,6 +2842,8 @@ func _connect_signals():
 			black_hole.shockwave_triggered.connect(_on_black_hole_shockwave_triggered)
 		if black_hole.has_signal("fever_started"):
 			black_hole.fever_started.connect(_on_black_hole_fever_started)
+		if black_hole.has_signal("fever_changed"):
+			black_hole.fever_changed.connect(_on_black_hole_fever_changed)
 		if black_hole.has_signal("fever_ended"):
 			black_hole.fever_ended.connect(_on_black_hole_fever_ended)
 		if black_hole.has_signal("fever_enemy_combo"):
@@ -2934,8 +2938,12 @@ func _enter_main_menu() -> void:
 	wanted_level = 0
 	_combo_count = 0
 	_combo_timer = 0.0
+	_fever_combo_count = 0
+	_fever_combo_last_sec = -9999.0
+	_fever_time_left = 0.0
 	if _spawn_mgr:
 		_spawn_mgr.reset_powerup_state()
+		_spawn_mgr.set_fever_active(false)
 	if %BlackHole and %BlackHole.has_method("set_shield_active"):
 		%BlackHole.set_shield_active(false)
 	_hide_boss_hp_bar()
@@ -3939,7 +3947,8 @@ func _update_fever_combo_ui() -> void:
 		fever_bar.max_value = float(max(1, reduced))
 	if _is_fever_active():
 		fever_bar.visible = true
-		fever_bar.value = fever_bar.max_value
+		fever_bar.max_value = maxf(0.001, _fever_duration)
+		fever_bar.value = clampf(_fever_time_left, 0.0, _fever_duration)
 		return
 	var now_sec: float = float(Time.get_ticks_msec()) / 1000.0
 	var active: bool = _fever_combo_count > 0 and (now_sec - _fever_combo_last_sec) <= fever_combo_chain_window_sec
@@ -3973,7 +3982,11 @@ func _register_swallow_for_fever() -> void:
 			bh.call("start_fever")
 
 
-func _on_black_hole_fever_started(_duration: float) -> void:
+func _on_black_hole_fever_started(duration: float) -> void:
+	_fever_duration = maxf(0.001, duration)
+	_fever_time_left = _fever_duration
+	if _spawn_mgr:
+		_spawn_mgr.set_fever_active(true)
 	# 移速提升：透過 PlayerController 的 speed multiplier
 	var pc = get_node_or_null("PlayerController")
 	if pc and pc.has_method("apply_speed_multiplier"):
@@ -3994,7 +4007,16 @@ func _on_black_hole_fever_started(_duration: float) -> void:
 	_update_fever_combo_ui()
 
 
+func _on_black_hole_fever_changed(time_remaining: float, duration: float) -> void:
+	_fever_time_left = maxf(0.0, time_remaining)
+	_fever_duration = maxf(0.001, duration)
+	_update_fever_combo_ui()
+
+
 func _on_black_hole_fever_ended() -> void:
+	_fever_time_left = 0.0
+	if _spawn_mgr:
+		_spawn_mgr.set_fever_active(false)
 	# Restore proper speed (meta + roguelike modifiers) instead of resetting to 1.0
 	_apply_roguelike_speed()
 	_update_fever_combo_ui()

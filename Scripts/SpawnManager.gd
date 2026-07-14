@@ -23,6 +23,11 @@ var max_prey_alive: int = 90
 var max_enemies_alive: int = 22
 var max_enemy_projectiles_alive: int = 90
 
+# ---- FEVER hunt pacing ----
+var fever_active: bool = false
+var fever_enemy_target: int = 8
+var fever_spawn_interval: float = 0.55
+
 # ---- Powerup scenes ----
 var _magnet_scene: PackedScene = preload("res://Scenes/MagnetItem.tscn")
 var _hourglass_scene: PackedScene = preload("res://Scenes/HourglassItem.tscn")
@@ -154,12 +159,36 @@ func stop_timers() -> void:
 		powerup_spawn_timer.stop()
 
 
+func set_fever_active(active: bool) -> void:
+	fever_active = active
+	for enemy in get_tree().get_nodes_in_group("Enemies"):
+		if not is_instance_valid(enemy) or enemy.is_queued_for_deletion():
+			continue
+		if enemy.has_method("is_boss") and bool(enemy.call("is_boss")):
+			continue
+		if enemy.has_method("set_edible"):
+			enemy.call("set_edible", active)
+
+	if not enemy_spawn_timer:
+		return
+	if fever_active:
+		enemy_spawn_timer.wait_time = fever_spawn_interval
+		enemy_spawn_timer.start()
+		# Prime one dense wave immediately; the normal cap still applies.
+		_spawn_enemy()
+	elif _main and bool(_main.get("game_started")):
+		update_enemy_spawning(int(_main.wanted_level))
+	else:
+		enemy_spawn_timer.stop()
+
+
 func reset_powerup_state() -> void:
 	magnet_time_left = 0.0
 	hourglass_time_left = 0.0
 	hourglass_active = false
 	shield_time_left = 0.0
 	score_boost_time_left = 0.0
+	fever_active = false
 	# Boss reset
 	boss_active = false
 	boss_instance = null
@@ -224,6 +253,9 @@ func _spawn_relief_prey() -> void:
 func _apply_wave_to_enemy_timer() -> void:
 	"""將波浪倍率套用到敵人生成計時器"""
 	if not enemy_spawn_timer:
+		return
+	if fever_active:
+		enemy_spawn_timer.wait_time = fever_spawn_interval
 		return
 	var wl: int = 0
 	if _main:
@@ -335,10 +367,13 @@ func _spawn_enemy() -> void:
 		3: desired = 7
 		4: desired = 9
 		5: desired = 11
+	if fever_active:
+		desired = maxi(desired, fever_enemy_target)
 	desired = clampi(desired, 1, max_enemies_alive)
 	if enemies_now >= desired:
 		return
-	var spawn_count: int = clampi(desired - enemies_now, 1, 3)
+	var burst_cap := 4 if fever_active else 3
+	var spawn_count: int = clampi(desired - enemies_now, 1, burst_cap)
 	var proj_now: int = _get_cached_group("EnemyProjectiles").size()
 	if proj_now >= max_enemy_projectiles_alive:
 		spawn_count = mini(spawn_count, 1)
@@ -352,6 +387,16 @@ func _spawn_enemy() -> void:
 			enemy.set_stage(stage)
 		enemy.add_to_group("Enemies")
 		_main.add_child(enemy)
+		_configure_enemy_for_current_state(enemy)
+
+
+func _configure_enemy_for_current_state(enemy: Node) -> void:
+	if not is_instance_valid(enemy):
+		return
+	if enemy.has_method("is_boss") and bool(enemy.call("is_boss")):
+		return
+	if enemy.has_method("set_edible"):
+		enemy.call("set_edible", fever_active)
 
 
 func _spawn_powerup() -> void:
@@ -398,6 +443,7 @@ func spawn_campaign_center_enemy(campaign_center: Vector2, proximity: float) -> 
 		enemy.set_stage(_main.wanted_level)
 	enemy.add_to_group("Enemies")
 	_main.add_child(enemy)
+	_configure_enemy_for_current_state(enemy)
 
 
 # ===========================================================
@@ -448,6 +494,7 @@ func _on_boss_summon(boss_pos: Vector2) -> void:
 			enemy.call("set_stage", 4)  # 高階敵人
 		enemy.add_to_group("Enemies")
 		_main.add_child(enemy)
+		_configure_enemy_for_current_state(enemy)
 
 func _on_boss_hp_changed(current_hp: float, max_hp: float) -> void:
 	if _main and _main.has_method("_on_boss_hp_changed"):
@@ -544,6 +591,10 @@ func apply_enemy_stage_to_all(stage: int) -> void:
 
 func update_enemy_spawning(wl: int) -> void:
 	if not enemy_spawn_timer:
+		return
+	if fever_active:
+		enemy_spawn_timer.wait_time = fever_spawn_interval
+		enemy_spawn_timer.start()
 		return
 	var new_wait_time := 8.0
 	match wl:

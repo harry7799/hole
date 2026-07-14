@@ -1,5 +1,9 @@
 extends Area2D
 
+const FEVER_SCORE_BY_STAGE: Array[float] = [120.0, 180.0, 260.0, 360.0, 480.0, 650.0]
+const FEVER_STABILITY_BY_STAGE: Array[float] = [8.0, 10.0, 12.0, 14.0, 17.0, 20.0]
+const FEVER_GROWTH_BY_STAGE: Array[int] = [2, 2, 3, 3, 4, 4]
+
 # ----------------------------------------------------
 # 遊玩數值常數
 # ----------------------------------------------------
@@ -9,6 +13,10 @@ const MELEE_HIT_RADIUS: float = 140.0
 # 資源與節點引用
 # ----------------------------------------------------
 @export var move_speed: float = 150.0
+@export_range(0.1, 2.0, 0.05) var melee_hit_cooldown: float = 0.65
+@export_range(80.0, 360.0, 5.0) var edible_capture_radius: float = 190.0
+@export_range(0.1, 1.0, 0.05) var edible_move_speed_scale: float = 0.52
+@export var edible_tint: Color = Color("#78f5ff")
 @export var damage: float = 10.0 # 撞到黑洞扣多少能量 (近戰傷害)
 
 # 近戰撞擊時的「蒸發」效果（縮小/噴裝）
@@ -37,8 +45,17 @@ var projectile_texture: Texture2D = null
 var target: Node2D = null
 var _frozen: bool = false
 var _pending_destroy: bool = false
+var _edible: bool = false
+var _consumed: bool = false
+var _contact_cooldown_left: float = 0.0
+var _fever_visual_time: float = 0.0
+var _orbit_sign: float = 1.0
+var _base_sprite_modulate: Color = Color.WHITE
+var _base_sprite_scale: Vector2 = Vector2.ONE
+var _base_scale: Vector2 = Vector2.ONE
 
 @onready var _sprite := get_node_or_null("Sprite2D") as Sprite2D
+@onready var _collision_shape := get_node_or_null("CollisionShape2D") as CollisionShape2D
 var _default_enemy_texture: Texture2D = null
 
 @export var telegraph_enabled: bool = true
@@ -54,7 +71,15 @@ func is_enemy() -> bool:
 
 func get_score_value() -> float:
 	# Used by BlackHole swallow logic (especially in Fever Mode).
-	return 18.0 + float(stage) * 4.0
+	return FEVER_SCORE_BY_STAGE[clampi(stage, 0, FEVER_SCORE_BY_STAGE.size() - 1)]
+
+
+func get_stability_value() -> float:
+	return FEVER_STABILITY_BY_STAGE[clampi(stage, 0, FEVER_STABILITY_BY_STAGE.size() - 1)]
+
+
+func get_growth_value() -> int:
+	return FEVER_GROWTH_BY_STAGE[clampi(stage, 0, FEVER_GROWTH_BY_STAGE.size() - 1)]
 
 @onready var shoot_timer = $ShootTimer # 假設你在 Enemy.tscn 內新增了 Timer 節點
 @onready var muzzle = $Muzzle           # 假設你在 Enemy.tscn 內新增了 Marker2D 節點
@@ -65,6 +90,8 @@ func set_target(t):
 func _ready():
 	# 確保敵人被加入 Enemies 群組
 	add_to_group("Enemies")
+	_orbit_sign = -1.0 if randf() < 0.5 else 1.0
+	_base_scale = scale
 	# 保險起見：確保 body_entered 有連線（避免場景沒接造成不扣血）
 	if not body_entered.is_connected(_on_body_entered):
 		body_entered.connect(_on_body_entered)
@@ -82,6 +109,9 @@ func _ready():
 	_set_stage_params(stage)
 	if _sprite and _default_enemy_texture == null:
 		_default_enemy_texture = _sprite.texture
+	if _sprite:
+		_base_sprite_modulate = _sprite.modulate
+		_base_sprite_scale = _sprite.scale
 
 	# 手機可讀性：高階段射擊前顯示預警線
 	_telegraph_line = Line2D.new()
@@ -91,71 +121,136 @@ func _ready():
 	_telegraph_line.z_index = 50
 	add_child(_telegraph_line)
 
-func _physics_process(delta):
+func _physics_process(delta: float) -> void:
+	if _consumed:
+		return
+	_contact_cooldown_left = maxf(0.0, _contact_cooldown_left - maxf(delta, 0.0))
+	if not is_instance_valid(target):
+		return
+
+	var to_target := target.global_position - global_position
+	var distance_to_target := to_target.length()
+	var inward := to_target.normalized() if distance_to_target > 0.001 else Vector2.RIGHT
+
+	if _edible:
+		_update_edible_visual(delta)
+		if distance_to_target <= edible_capture_radius and _try_target_swallow(target):
+			return
+		if not _frozen:
+			# Stay readable as prey while the black-hole pull wins at close range.
+			var tangent := inward.orthogonal() * _orbit_sign
+			var flee_direction := (-inward * 0.72 + tangent * 0.70).normalized()
+			position += flee_direction * move_speed * edible_move_speed_scale * delta
+			rotation = flee_direction.angle() + deg_to_rad(90.0)
+		return
+
+	_restore_normal_visual_state()
 	if _frozen:
 		return
-	if not is_instance_valid(target): return
-	
-	# 簡單的追蹤 AI
-	var dir = (target.global_position - global_position).normalized()
-	position += dir * move_speed * delta
-	
-	# 旋轉向目標 
-	# (假設 Sprite 預設面向上方，所以需要 +90 度來讓子彈朝前)
-	rotation = dir.angle() + deg_to_rad(90) 
 
-	# Damage should apply when we reach the black hole core, not when we first enter
-	# the huge gravity Area2D.
-	if not _pending_destroy and (target.is_in_group("Player") or target.has_method("apply_damage")):
-		var r: float = MELEE_HIT_RADIUS
-		if target.has_method("get_damage_radius"):
-			r = float(target.call("get_damage_radius"))
-		if global_position.distance_to(target.global_position) <= r:
-			_pending_destroy = true
-			_deal_melee_hit(target)
+	# The player's gravity Area is much larger than its damaging core. Poll core
+	# distance every frame so entering the outer Area cannot consume the only hit.
+	var melee_radius := _get_target_core_radius(target)
+	if distance_to_target <= melee_radius:
+		_deal_melee_hit(target)
+		if _consumed or is_queued_for_deletion():
+			return
+
+	position += inward * move_speed * delta
+	rotation = inward.angle() + deg_to_rad(90.0)
+	# Catch fast crossings that enter the core during this movement step.
+	if global_position.distance_to(target.global_position) <= melee_radius:
+		_deal_melee_hit(target)
 
 
 func _process(_delta: float) -> void:
-	# Hourglass “time stop” freezes enemy physics; allow Fever hunt by proximity when the player moves into the enemy.
-	if not _frozen:
+	# Hourglass freezes physics; FEVER contact still needs to respond while frozen.
+	if not _frozen or _consumed or not _edible or not is_instance_valid(target):
 		return
-	if _pending_destroy:
-		return
-	if not is_instance_valid(target):
-		return
-	if not (target.is_in_group("Player") or target.has_method("apply_damage")):
-		return
-	if target.has_method("is_fever_active") and bool(target.call("is_fever_active")):
-		if not (target is Node2D):
-			return
-		var r: float = MELEE_HIT_RADIUS
-		if target.has_method("get_damage_radius"):
-			r = float(target.call("get_damage_radius"))
-		if global_position.distance_to((target as Node2D).global_position) <= r:
-			_pending_destroy = true
-			if target.has_method("_swallow_body"):
-				target.call("_swallow_body", self)
-			else:
-				queue_free()
+	if global_position.distance_to(target.global_position) <= edible_capture_radius:
+		_try_target_swallow(target)
 
 
 func set_frozen(frozen: bool) -> void:
 	_frozen = frozen
-	set_physics_process(not frozen)
+	_sync_activity_state()
+
+
+func set_edible(edible: bool) -> void:
+	if _consumed:
+		return
+	_edible = edible
+	_pending_destroy = false
+	_contact_cooldown_left = 0.0
+	if is_node_ready():
+		_apply_edible_visual_state()
+		_sync_activity_state()
+
+
+func is_edible() -> bool:
+	return _edible and not _consumed
+
+
+func is_consumed() -> bool:
+	return _consumed
+
+
+func _get_target_core_radius(hit: Object) -> float:
+	var radius := MELEE_HIT_RADIUS
+	if hit and hit.has_method("get_damage_radius"):
+		radius = float(hit.call("get_damage_radius"))
+	return maxf(1.0, radius)
+
+
+func _sync_activity_state() -> void:
+	if not is_node_ready():
+		return
+	set_physics_process(not _consumed)
 	if shoot_timer:
-		shoot_timer.paused = frozen
+		shoot_timer.paused = _frozen or _edible or _consumed
+
+
+func _apply_edible_visual_state() -> void:
+	if not _sprite:
+		return
+	if _edible:
+		_sprite.modulate = edible_tint
+		_sprite.scale = _base_sprite_scale * 1.06
+	else:
+		_restore_normal_visual_state()
+
+
+func _restore_normal_visual_state() -> void:
+	if not _sprite or _consumed or _edible:
+		return
+	_sprite.modulate = _base_sprite_modulate
+	_sprite.scale = _base_sprite_scale
+
+
+func _update_edible_visual(delta: float) -> void:
+	if not _sprite:
+		return
+	_fever_visual_time += maxf(delta, 0.0)
+	var pulse := 1.06 + sin(_fever_visual_time * 9.0) * 0.055
+	var glow := 0.82 + sin(_fever_visual_time * 7.0) * 0.12
+	_sprite.scale = _base_sprite_scale * pulse
+	_sprite.modulate = Color(
+		minf(edible_tint.r * glow + 0.12, 1.0),
+		minf(edible_tint.g * glow + 0.12, 1.0),
+		minf(edible_tint.b * glow + 0.12, 1.0),
+		_base_sprite_modulate.a
+	)
 
 # ----------------------------------------------------
 # 射擊邏輯
 # ----------------------------------------------------
 func _shoot():
+	if _frozen or _edible or _consumed:
+		return
 	# 檢查目標是否有效、是否有投射物場景
 	if not is_instance_valid(target) or not projectile_scene: return
 	if get_tree().get_nodes_in_group("EnemyProjectiles").size() >= max_global_projectiles:
 		return
-	if _frozen:
-		return
-
 	var base_dir: Vector2 = (target.global_position - muzzle.global_position).normalized()
 	if base_dir.length() < 0.001:
 		base_dir = Vector2.RIGHT
@@ -169,7 +264,7 @@ func _shoot():
 		_hide_telegraph()
 		_telegraphing = false
 		# 可能在等待期間被凍結/死亡
-		if _frozen or not is_instance_valid(target):
+		if _frozen or _edible or _consumed or not is_instance_valid(target):
 			return
 		_fire_projectiles(base_dir)
 		return
@@ -214,7 +309,12 @@ func _fire_projectiles(base_dir: Vector2) -> void:
 		projectile.global_position = muzzle.global_position
 		projectile.speed = projectile_speed
 		projectile.damage = projectile_damage
-		projectile.velocity = dir * projectile_speed
+		var shot_velocity := dir * projectile_speed
+		if projectile.has_method("set_motion"):
+			projectile.call("set_motion", shot_velocity)
+		else:
+			projectile.velocity = shot_velocity
+			projectile.global_rotation = dir.angle()
 		if projectile_texture:
 			var spr := projectile.get_node_or_null("Sprite2D") as Sprite2D
 			if spr:
@@ -232,31 +332,76 @@ func _on_area_entered(area: Area2D) -> void:
 
 
 func _deal_melee_hit(hit: Object) -> void:
-	if not hit:
+	if _consumed or not hit:
 		return
-	# 檢查是否撞到黑洞 (Player group)
-	if hit.is_in_group("Player") or hit.has_method("apply_damage"):
-		# 黑洞的吸引範圍碰撞圈很大，避免遠距離「擦到」就算近戰命中
+	if not (hit.is_in_group("Player") or hit.has_method("apply_damage")):
+		return
+
+	var distance_to_hit := INF
+	if hit is Node2D:
+		distance_to_hit = global_position.distance_to((hit as Node2D).global_position)
+
+	# FEVER ownership stays atomic in BlackHole: an overlap can never both score
+	# and damage the player, even during the one-frame state handoff.
+	if _edible or (hit.has_method("is_fever_active") and bool(hit.call("is_fever_active"))):
+		if distance_to_hit <= edible_capture_radius:
+			_try_target_swallow(hit)
+		return
+
+	if distance_to_hit > _get_target_core_radius(hit):
+		return
+	if _contact_cooldown_left > 0.0 or _pending_destroy:
+		return
+	_contact_cooldown_left = melee_hit_cooldown
+	_pending_destroy = true
+	if hit.has_method("apply_damage"):
+		hit.call("apply_damage", damage)
+	if hit.has_method("shrink_and_eject"):
+		hit.call("shrink_and_eject", shrink_amount, eject_count)
+	queue_free()
+
+
+func _try_target_swallow(hit: Object) -> bool:
+	if _consumed or not hit or not hit.has_method("try_swallow_enemy"):
+		return false
+	var accepted := bool(hit.call("try_swallow_enemy", self))
+	if not accepted:
+		return false
+	# BlackHole normally starts the tween while awarding the kill. Keep the
+	# interface safe for any alternate player implementation.
+	if not _consumed and not is_queued_for_deletion():
+		var sink_position := global_position
 		if hit is Node2D:
-			var d: float = global_position.distance_to((hit as Node2D).global_position)
-			var r: float = MELEE_HIT_RADIUS
-			if hit.has_method("get_damage_radius"):
-				r = float(hit.call("get_damage_radius"))
-			if d > r:
-				return
-		# Fever：不造成傷害，直接被吞噬（爽快感）
-		if hit.has_method("is_fever_active") and bool(hit.call("is_fever_active")):
-			# 若黑洞提供 Fever 吞噬介面就走該介面（可加分/回復穩定度）
-			if hit.has_method("_swallow_body") and self is Node2D:
-				hit.call("_swallow_body", self)
-			else:
-				queue_free()
-			return
-		if hit.has_method("apply_damage"):
-			hit.apply_damage(damage)
-		if hit.has_method("shrink_and_eject"):
-			hit.shrink_and_eject(shrink_amount, eject_count)
-		queue_free()
+			sink_position = (hit as Node2D).global_position
+		begin_swallowed(sink_position)
+	return true
+
+
+func begin_swallowed(sink_position: Vector2, duration: float = 0.16) -> bool:
+	if _consumed:
+		return false
+	_consumed = true
+	_edible = false
+	_pending_destroy = true
+	remove_from_group("Enemies")
+	set_physics_process(false)
+	if shoot_timer:
+		shoot_timer.stop()
+	if _telegraph_line:
+		_telegraph_line.visible = false
+	set_deferred("monitoring", false)
+	set_deferred("monitorable", false)
+	if _collision_shape:
+		_collision_shape.set_deferred("disabled", true)
+
+	var tween_duration := maxf(duration, 0.05)
+	var swallow_tween := create_tween().set_parallel()
+	swallow_tween.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	swallow_tween.tween_property(self, "global_position", sink_position, tween_duration)
+	swallow_tween.tween_property(self, "scale", _base_scale * 0.04, tween_duration)
+	swallow_tween.tween_property(self, "modulate:a", 0.0, tween_duration)
+	swallow_tween.finished.connect(queue_free)
+	return true
 
 
 func set_stage(new_stage: int) -> void:

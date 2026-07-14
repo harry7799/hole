@@ -29,12 +29,24 @@ var _skin_ripple_speed_mult: float = 1.0
 # 為了在 Main.gd 之外調整 WorldEnvironment
 var main_scene_node: Node2D 
 var black_hole_material: ShaderMaterial 
-# 【新增】全螢幕效果相關變數
-#@onready var full_screen_effect_node: CanvasLayer = null # 引用全螢幕效果節點
-@onready var full_screen_effect = get_node("%FullScreenEffect") as Node2D
-var full_screen_distort_material: ShaderMaterial = null   # 引用全螢幕 ShaderMaterial
+# 全螢幕透明折射鏡頭。材質會在 _ready() 複製，避免其他場景共用參數。
+@onready var full_screen_effect: Node2D = get_node_or_null("%FullScreenEffect") as Node2D
+var full_screen_distort_material: ShaderMaterial = null
+var full_screen_color_rect: ColorRect = null
+var _fullscreen_uses_lens_shader: bool = true
 
 @export var fullscreen_distort_enabled: bool = true
+
+enum DistortionQuality {
+	LOW,
+	MEDIUM,
+	HIGH,
+}
+
+@export_enum("Low", "Medium", "High") var distortion_quality: int = DistortionQuality.HIGH
+@export var reduced_motion: bool = false
+@export_range(0.25, 1.5, 0.05) var lens_radius_scale: float = 0.9
+@export_range(0.0, 1.0, 0.05) var lens_opacity: float = 0.9
 
 # Debug: 在編輯器 / 測試時強制指派 fallback shader（方便快速驗證）
 @export var debug_force_assign_fullscreen_fallback: bool = false
@@ -104,10 +116,13 @@ func _ensure_skin_overlay() -> void:
 	_skin_overlay.material = mat
 	add_child(_skin_overlay)
 
-@export var distort_start_level: int = 1     # 全螢幕扭曲效果開始的等級
-@export var max_distort_radius: float = 1.0   # 扭曲效果最大擴散半徑 (1.0 = 全屏)
-@export var max_distort_strength: float = 0.05 # 扭曲效果最大強度
-@export var max_distort_speed: float = 0.25    # 扭曲漣漪最大速度（降速）
+@export var distort_start_level: int = 1
+@export_range(0.05, 1.25, 0.05) var max_distort_radius: float = 1.0
+@export_range(0.0, 0.12, 0.002) var max_distort_strength: float = 0.055
+@export_range(0.0, 2.0, 0.05) var max_distort_speed: float = 1.3
+@export_range(0.0, 0.22, 0.005) var gravity_wave_strength: float = 0.185
+@export_range(12.0, 52.0, 0.5) var gravity_wave_frequency: float = 19.5
+@export_range(1.0, 7.0, 0.05) var gravity_wave_speed: float = 1.45
 
 # Fullscreen fallback shader default parameters (editable in Inspector)
 @export var fs_fallback_radius: float = 0.5
@@ -120,23 +135,27 @@ func _ensure_skin_overlay() -> void:
 # ----------------------------------------------------
 signal fever_started(duration: float)
 const DEBUG_ENABLE_GLOBAL_FULLSCREEN_TEST: bool = false
+signal fever_changed(time_left: float, duration: float)
 signal fever_ended()
 signal fever_enemy_combo(combo: int, world_pos: Vector2)
 
-@export var fever_duration_sec: float = 6.5
+@export var fever_duration_sec: float = 8.0
 @export var fever_pull_radius_multiplier: float = 2.0
+@export_range(120.0, 320.0, 5.0) var fever_capture_radius: float = 210.0
+@export_range(300.0, 1200.0, 25.0) var fever_pull_speed: float = 650.0
 @export var fever_speed_multiplier: float = 1.5
 @export var fever_projectile_absorb_radius: float = 360.0
 @export var fever_projectile_absorb_interval_sec: float = 0.08
 
 # Fever rewards: make “hunt mode” feel like Pac-Man.
-@export var fever_enemy_score_multiplier: float = 2.0
-@export var fever_enemy_time_bonus_sec: float = 0.9
+@export var fever_enemy_score_multiplier: float = 1.0
+@export var fever_enemy_time_bonus_sec: float = 0.0
 @export var fever_time_cap_multiplier: float = 2.25
 
 # Fever visuals: clear outer halo.
 @export var fever_ring_scale_multiplier: float = 0.85
 @export var fever_ring_alpha: float = 0.55
+@export var fever_legacy_ring_enabled: bool = false
 
 # Fullscreen ripple readability boosts.
 @export var ripple_strength_boost: float = 1.75
@@ -146,6 +165,7 @@ signal fever_enemy_combo(combo: int, world_pos: Vector2)
 
 var fever_active: bool = false
 var _fever_time_left: float = 0.0
+var _fever_total_duration: float = 0.0
 var _fever_absorb_accum: float = 0.0
 var _base_visual_modulate: Color = Color(1, 1, 1, 1)
 var _fever_particles_restore: Dictionary = {}
@@ -235,19 +255,49 @@ func get_damage_radius() -> float:
 
 
 func disable_fullscreen_distort() -> void:
-	if not full_screen_distort_material:
-		return
-	full_screen_distort_material.set_shader_parameter("distort_radius", 0.0)
-	full_screen_distort_material.set_shader_parameter("distort_strength", 0.0)
-	full_screen_distort_material.set_shader_parameter("distort_speed", 0.0)
-	# 中心點給個合理值，避免某些 shader 用到未更新中心
-	full_screen_distort_material.set_shader_parameter("center_uv", Vector2(0.5, 0.5))
+	_set_fallback_overlay_opacity(1.0)
+	if full_screen_distort_material:
+		full_screen_distort_material.set_shader_parameter("lens_radius", 0.0)
+		full_screen_distort_material.set_shader_parameter("lens_strength", 0.0)
+		full_screen_distort_material.set_shader_parameter("effect_opacity", 0.0)
+		full_screen_distort_material.set_shader_parameter("distort_radius", 0.0)
+		full_screen_distort_material.set_shader_parameter("distort_strength", 0.0)
+		full_screen_distort_material.set_shader_parameter("distort_speed", 0.0)
+		full_screen_distort_material.set_shader_parameter("center_uv", Vector2(0.5, 0.5))
+	if full_screen_color_rect:
+		full_screen_color_rect.hide()
 
 
 func set_fullscreen_distort_enabled(enabled: bool) -> void:
 	fullscreen_distort_enabled = enabled
 	if not fullscreen_distort_enabled:
 		disable_fullscreen_distort()
+	else:
+		# The old sprite stays visible while the screen-reading lens warms up.
+		# Its self_modulate alpha is then faded out against lens opacity.
+		_set_fallback_overlay_opacity(1.0)
+		if full_screen_color_rect:
+			full_screen_color_rect.show()
+
+
+func _set_fallback_overlay_opacity(opacity: float) -> void:
+	if visuals:
+		visuals.self_modulate.a = clampf(opacity, 0.0, 1.0)
+
+
+func set_distortion_quality(quality: int) -> void:
+	distortion_quality = clampi(quality, DistortionQuality.LOW, DistortionQuality.HIGH)
+	if full_screen_distort_material and _fullscreen_uses_lens_shader:
+		full_screen_distort_material.set_shader_parameter("quality", distortion_quality)
+
+
+func set_reduced_motion(enabled: bool) -> void:
+	reduced_motion = enabled
+	var motion_scale := 0.0 if reduced_motion else 1.0
+	if full_screen_distort_material and _fullscreen_uses_lens_shader:
+		full_screen_distort_material.set_shader_parameter("motion_scale", motion_scale)
+	if black_hole_material:
+		black_hole_material.set_shader_parameter("motion_scale", motion_scale)
 
 
 func reset_for_new_run() -> void:
@@ -278,6 +328,7 @@ func reset_for_new_run() -> void:
 func _ready():
 	# 讓 Enemy / Projectile 可以用群組辨識玩家本體
 	add_to_group("Player")
+	main_scene_node = get_tree().get_first_node_in_group("MainScene") as Node2D
 	if visuals:
 		_base_visual_modulate = visuals.modulate
 	# Prefer a dedicated Fever particle node if present (MainScene adds GlitchParticles2).
@@ -309,60 +360,54 @@ func _ready():
 	# 這會導致「卡著不互動」；延遲一幀後主動掃描重疊物體加入追蹤清單
 	call_deferred("_bootstrap_overlapping_bodies")
 
-	# 取得黑洞自身材質（用於強度/半徑/色差參數更新）
+	# Own both materials so map previews, bosses and gacha scenes cannot leak
+	# parameters into the gameplay instance.
 	if visuals and visuals.material is ShaderMaterial:
-		black_hole_material = visuals.material as ShaderMaterial
+		black_hole_material = (visuals.material as ShaderMaterial).duplicate() as ShaderMaterial
+		visuals.material = black_hole_material
+	_setup_fullscreen_material()
+	set_distortion_quality(distortion_quality)
+	set_reduced_motion(reduced_motion)
+	disable_fullscreen_distort()
 
 
-	# 你原本的所有 _ready 內容保持不變（到 main_scene_node 為止）
-	main_scene_node = get_tree().get_first_node_in_group("MainScene")
+func _setup_fullscreen_material() -> void:
+	if not full_screen_effect and main_scene_node:
+		full_screen_effect = main_scene_node.get_node_or_null("%FullScreenEffect") as Node2D
+	if not full_screen_effect and main_scene_node:
+		full_screen_effect = main_scene_node.find_child("FullScreenEffect", true, false) as Node2D
+	if not full_screen_effect:
+		push_error("BlackHole could not find FullScreenEffect.")
+		return
 
-	# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-	# 新增：直接抓場景裡的 FullScreenEffect，並在必要時套用跨平台 fallback shader
-	if full_screen_effect:
-		var color_rect = full_screen_effect.get_node_or_null("CanvasLayer/ColorRect") as ColorRect
-		var platform_name: String = OS.get_name()
-		var need_fallback: bool = false
-		if not color_rect:
-			push_error("FullScreenEffect 的 ColorRect 找不到，將使用 fallback shader")
-			need_fallback = true
-		else:
-			# Prefer the existing material unless running on JS/mobile or material missing
-			var has_mat = color_rect.material != null
+	full_screen_color_rect = full_screen_effect.get_node_or_null("CanvasLayer/ColorRect") as ColorRect
+	if not full_screen_color_rect:
+		push_error("FullScreenEffect requires CanvasLayer/ColorRect.")
+		return
 
-			# Debug override: 強制在編輯器或測試時套用 fallback（方便快速驗證）
-			if debug_force_assign_fullscreen_fallback:
-				need_fallback = true
-				print("Debug: 強制套用 fullscreen fallback shader（debug_force_assign_fullscreen_fallback = true）")
-
-			if not has_mat:
-				need_fallback = true
-
-		if fullscreen_distort_enabled:
-			full_screen_effect.visible = true
-		if need_fallback:
-			var fallback_shader_res = ResourceLoader.load("res://Shaders/FullScreenFallback.gdshader")
-			if fallback_shader_res and fallback_shader_res is Shader:
-				var mat = ShaderMaterial.new()
-				mat.shader = fallback_shader_res
-				if color_rect:
-					color_rect.material = mat
-					# Ensure ColorRect is opaque so shader output is visible (alpha 1)
-					color_rect.color = Color(1, 1, 1, 1)
-					print("Assigned FullScreenFallback shader and set ColorRect alpha=1 so effect is visible")
-					full_screen_distort_material = mat
-					# apply initial parameters from exports
-					_apply_fullscreen_material_defaults()
-					print("已指派 fallback fullscreen shader (platform=%s)" % platform_name)
-			else:
-				push_error("找不到 fallback shader: res://Shaders/FullScreenFallback.gdshader")
-		else:
-			full_screen_distort_material = (color_rect.material as ShaderMaterial) if color_rect else null
-			if color_rect:
-				color_rect.color = Color(1, 1, 1, 1)
-			print("全屏漣漪材質成功取得！")
+	var source_material := full_screen_color_rect.material as ShaderMaterial
+	if debug_force_assign_fullscreen_fallback or not source_material:
+		var fallback_shader := ResourceLoader.load("res://Shaders/FullScreenFallback.gdshader") as Shader
+		if not fallback_shader:
+			push_error("Could not load FullScreenFallback.gdshader.")
+			return
+		full_screen_distort_material = ShaderMaterial.new()
+		full_screen_distort_material.shader = fallback_shader
+		_fullscreen_uses_lens_shader = false
 	else:
-		push_error("找不到 %FullScreenEffect 節點！請確認已拖進 MainScene 並設為 Unique Name")
+		full_screen_distort_material = source_material.duplicate() as ShaderMaterial
+		_fullscreen_uses_lens_shader = true
+
+	full_screen_color_rect.material = full_screen_distort_material
+	full_screen_color_rect.color = Color.WHITE
+	full_screen_color_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	full_screen_effect.visible = true
+	if _fullscreen_uses_lens_shader:
+		full_screen_distort_material.set_shader_parameter("gravity_wave_strength", gravity_wave_strength)
+		full_screen_distort_material.set_shader_parameter("gravity_wave_frequency", gravity_wave_frequency)
+		full_screen_distort_material.set_shader_parameter("gravity_wave_speed", gravity_wave_speed)
+	else:
+		_apply_fullscreen_material_defaults()
 
 
 func _bootstrap_overlapping_bodies() -> void:
@@ -430,77 +475,127 @@ func set_fullscreen_params(radius: float, strength: float, speed: float, tint: C
 	fs_fallback_speed = speed
 	fs_fallback_tint = tint
 	if full_screen_distort_material:
-		_full_set_param(full_screen_distort_material, ["distort_radius", "radius"], radius)
-		_full_set_param(full_screen_distort_material, ["distort_strength", "strength"], strength)
-		_full_set_param(full_screen_distort_material, ["distort_speed", "speed"], speed)
-		_full_set_param(full_screen_distort_material, ["tint_color", "color", "distort_tint"], tint)
+		if _fullscreen_uses_lens_shader:
+			full_screen_distort_material.set_shader_parameter("lens_radius", radius)
+			full_screen_distort_material.set_shader_parameter("lens_strength", strength)
+			full_screen_distort_material.set_shader_parameter("animation_speed", speed)
+		else:
+			_full_set_param(full_screen_distort_material, ["distort_radius", "radius"], radius)
+			_full_set_param(full_screen_distort_material, ["distort_strength", "strength"], strength)
+			_full_set_param(full_screen_distort_material, ["distort_speed", "speed"], speed)
+			_full_set_param(full_screen_distort_material, ["tint_color", "color", "distort_tint"], tint)
+
+
+func _update_fullscreen_distortion(delta: float) -> void:
+	if not full_screen_distort_material:
+		return
+	if not fullscreen_distort_enabled:
+		disable_fullscreen_distort()
+		return
+	if current_level < distort_start_level:
+		_fade_fullscreen_distortion(delta)
+		return
+	if full_screen_color_rect:
+		full_screen_color_rect.show()
+
+	var viewport := get_viewport()
+	var viewport_size: Vector2 = viewport.get_visible_rect().size
+	if viewport_size.x <= 1.0 or viewport_size.y <= 1.0:
+		return
+	var screen_transform: Transform2D = viewport.get_canvas_transform()
+	var screen_position_px: Vector2 = screen_transform * global_position
+	var center_uv := Vector2(
+		screen_position_px.x / viewport_size.x,
+		screen_position_px.y / viewport_size.y
+	)
+	full_screen_distort_material.set_shader_parameter("center_uv", center_uv)
+
+	var level_span := maxf(1.0, float(max_level - distort_start_level))
+	var progress := clampf(float(current_level - distort_start_level) / level_span, 0.0, 1.0)
+	var stability_ratio := clampf(current_stability / maxf(max_stability, 0.001), 0.0, 1.0)
+	var instability_ratio := 1.0 - stability_ratio
+	var target_radius := _get_visual_screen_radius(screen_transform, screen_position_px, viewport_size)
+	target_radius *= lerpf(0.94, 1.12, progress)
+	target_radius = clampf(target_radius, 2.0 / viewport_size.y, max_distort_radius)
+
+	var target_strength := max_distort_strength * lerpf(0.48, 1.0, progress)
+	target_strength *= lerpf(1.0, 1.35, instability_ratio)
+	target_strength *= ripple_strength_boost * _skin_ripple_strength_mult
+	if fever_active:
+		target_strength *= fever_ripple_strength_boost
+	if reduced_motion:
+		target_strength *= 0.62
+	target_strength = clampf(target_strength, 0.0, max_distort_strength * 2.0)
+
+	var target_speed := lerpf(0.8, max_distort_speed, progress)
+	target_speed *= ripple_speed_boost * _skin_ripple_speed_mult
+	if fever_active:
+		target_speed *= fever_ripple_speed_boost
+	target_speed = clampf(target_speed, 0.0, max_distort_speed * 1.5)
+
+	if not _fullscreen_uses_lens_shader:
+		_full_set_param(full_screen_distort_material, ["distort_radius", "radius"], target_radius)
+		_full_set_param(full_screen_distort_material, ["distort_strength", "strength"], target_strength)
+		_full_set_param(full_screen_distort_material, ["distort_speed", "speed"], target_speed)
+		_set_fallback_overlay_opacity(0.0)
+		return
+
+	var response := 1.0 - exp(-8.0 * maxf(delta, 0.0))
+	var current_radius := float(full_screen_distort_material.get_shader_parameter("lens_radius"))
+	var current_strength := float(full_screen_distort_material.get_shader_parameter("lens_strength"))
+	var current_opacity := float(full_screen_distort_material.get_shader_parameter("effect_opacity"))
+	var next_radius := lerpf(current_radius, target_radius, response)
+	var next_strength := lerpf(current_strength, target_strength, response)
+	var next_opacity := lerpf(current_opacity, lens_opacity, response)
+	full_screen_distort_material.set_shader_parameter("lens_radius", next_radius)
+	full_screen_distort_material.set_shader_parameter("lens_strength", next_strength)
+	full_screen_distort_material.set_shader_parameter("effect_opacity", next_opacity)
+	full_screen_distort_material.set_shader_parameter("animation_speed", target_speed)
+	full_screen_distort_material.set_shader_parameter("motion_scale", 0.0 if reduced_motion else 1.0)
+	# Fever is expressed by asymmetric cyan/white-gold broken arcs, never a full ring.
+	full_screen_distort_material.set_shader_parameter("photon_arc_energy", 0.96 if fever_active else 0.58)
+	var fallback_alpha := 1.0 - smoothstep(0.0, 0.10, next_opacity)
+	_set_fallback_overlay_opacity(fallback_alpha)
+
+
+func _fade_fullscreen_distortion(delta: float) -> void:
+	if not _fullscreen_uses_lens_shader:
+		disable_fullscreen_distort()
+		return
+	var response := 1.0 - exp(-10.0 * maxf(delta, 0.0))
+	var current_radius := float(full_screen_distort_material.get_shader_parameter("lens_radius"))
+	var current_strength := float(full_screen_distort_material.get_shader_parameter("lens_strength"))
+	var current_opacity := float(full_screen_distort_material.get_shader_parameter("effect_opacity"))
+	current_radius = lerpf(current_radius, 0.0, response)
+	current_strength = lerpf(current_strength, 0.0, response)
+	current_opacity = lerpf(current_opacity, 0.0, response)
+	full_screen_distort_material.set_shader_parameter("lens_radius", current_radius)
+	full_screen_distort_material.set_shader_parameter("lens_strength", current_strength)
+	full_screen_distort_material.set_shader_parameter("effect_opacity", current_opacity)
+	_set_fallback_overlay_opacity(1.0 - smoothstep(0.0, 0.10, current_opacity))
+	if current_opacity < 0.002 and full_screen_color_rect:
+		full_screen_color_rect.hide()
+
+
+func _get_visual_screen_radius(
+	screen_transform: Transform2D,
+	center_screen_px: Vector2,
+	viewport_size: Vector2
+) -> float:
+	var radius_px := 0.0
+	if visuals and visuals.texture:
+		var texture_size: Vector2 = visuals.texture.get_size()
+		var local_radius := maxf(texture_size.x, texture_size.y) * 0.5
+		var visual_edge_world: Vector2 = visuals.to_global(Vector2(local_radius, 0.0))
+		radius_px = center_screen_px.distance_to(screen_transform * visual_edge_world)
+	if radius_px <= 0.01:
+		var pull_edge_world := global_position + Vector2.RIGHT * maxf(_get_current_radius() * 0.35, base_kill_radius)
+		radius_px = center_screen_px.distance_to(screen_transform * pull_edge_world)
+	return (radius_px / maxf(viewport_size.y, 1.0)) * lens_radius_scale
 
 
 func _process(delta):
-	if full_screen_distort_material and not fullscreen_distort_enabled:
-		disable_fullscreen_distort()
-	elif full_screen_distort_material:
-			var viewport = get_viewport()
-			var camera = viewport.get_camera_2d()
-			
-			# 1. 計算並傳遞正確的中心 UV 座標 (保持不變)
-			if is_instance_valid(camera):
-				var vp_transform: Transform2D = camera.get_viewport_transform()
-				var screen_position_px = vp_transform * global_position
-				var viewport_size = viewport.get_visible_rect().size
-				var real_center_uv = screen_position_px / viewport_size
-				full_screen_distort_material.set_shader_parameter("center_uv", real_center_uv)
-
-			# 2. 動態調整漣漪參數（只在 level/stability/fever 狀態變化時更新）
-			var _shader_dirty: bool = (current_level != _prev_shader_level) or (absf(current_stability - _prev_shader_stability) > 0.5) or (fever_active != _prev_shader_fever)
-			if _shader_dirty:
-				_prev_shader_level = current_level
-				_prev_shader_stability = current_stability
-				_prev_shader_fever = fever_active
-			if current_level >= distort_start_level and _shader_dirty:
-				var progress = float(current_level - distort_start_level) / (max_level - distort_start_level)
-				progress = clamp(progress, 0.0, 1.0)
-				
-				var stability_ratio = current_stability / max_stability # 穩定度比例 (1.0 = Max, 0.0 = Min)
-				var instability_ratio = 1.0 - stability_ratio           # 不穩定比例 (0.0 = Max, 1.0 = Min)
-				
-				# A. 速度修正：【僅依等級成長】
-				#    速度從基礎值 (0.5) 緩慢成長到最大速度 (max_distort_speed)
-				var target_speed = lerp(0.15, max_distort_speed, progress)
-				
-				# B. 半徑修正：【僅依等級成長】(滿足你的需求)
-				#    半徑從 0.0 成長到 max_distort_radius (通常為 1.0，即全螢幕)
-				var target_radius = lerp(0.0, max_distort_radius, progress) 
-				
-				# C. 強度修正：【等級決定基礎強度 + 不穩定懲罰】
-				#    穩定度越低，強度越強，作為視覺警示。
-				var base_strength = lerp(0.0, max_distort_strength, progress)
-				var target_strength = lerp(base_strength, max_distort_strength * 2.0, instability_ratio)
-				
-				# Readability boost: make the effect clearly visible.
-				target_strength *= ripple_strength_boost
-				target_speed *= ripple_speed_boost
-				# Skin feel: different skins can have different ripple aggression.
-				target_strength *= _skin_ripple_strength_mult
-				target_speed *= _skin_ripple_speed_mult
-				if fever_active:
-					target_strength *= fever_ripple_strength_boost
-					target_speed *= fever_ripple_speed_boost
-				# Keep it sane across devices.
-				target_strength = clamp(target_strength, 0.0, max_distort_strength * 4.0)
-				target_speed = clamp(target_speed, 0.0, max_distort_speed * 3.0)
-
-				# 傳遞參數
-				full_screen_distort_material.set_shader_parameter("distort_radius", target_radius)
-				full_screen_distort_material.set_shader_parameter("distort_strength", target_strength)
-				full_screen_distort_material.set_shader_parameter("distort_speed", target_speed)
-
-			else:
-				# 等級不足時，平滑過渡到關閉效果 (保持不變)
-				var decay_speed = delta * 2.0
-				full_screen_distort_material.set_shader_parameter("distort_radius", lerp(full_screen_distort_material.get_shader_parameter("distort_radius"), 0.0, decay_speed))
-				full_screen_distort_material.set_shader_parameter("distort_strength", lerp(full_screen_distort_material.get_shader_parameter("distort_strength"), 0.0, decay_speed))
-				full_screen_distort_material.set_shader_parameter("distort_speed", lerp(full_screen_distort_material.get_shader_parameter("distort_speed"), 0.0, decay_speed))
+	_update_fullscreen_distortion(delta)
 	# 更新 Shader 中心點 (自身黑洞 Shader) - 這裡的函式體應該是空的或處理黑洞自身材質的
 	update_shader_position(delta) 
 	
@@ -508,7 +603,8 @@ func _process(delta):
 	if visuals:
 		var rotation_speed = 100.0 + (current_level - 1) * 250.0
 		rotation_speed = clamp(rotation_speed, 100.0, 5000.0)
-		visuals.rotation_degrees += rotation_speed * delta 
+		var rotation_motion := 0.08 if reduced_motion else 1.0
+		visuals.rotation_degrees += rotation_speed * delta * rotation_motion
 		if fever_active:
 			# Fever：金色/彩虹感（低成本：偏金色 + 輕微脈衝）
 			# Make it obvious: brighter gold with a stronger pulse.
@@ -525,8 +621,8 @@ func _process(delta):
 
 	# Fever ring (outer halo) - make the mode switch obvious.
 	if _fever_ring and is_instance_valid(_fever_ring) and visuals:
-		_fever_ring.visible = fever_active
-		if fever_active:
+		_fever_ring.visible = fever_active and fever_legacy_ring_enabled
+		if fever_active and fever_legacy_ring_enabled:
 			_fever_ring.position = Vector2.ZERO
 			_fever_ring.rotation_degrees = visuals.rotation_degrees * 0.65
 			var base_scale: Vector2 = visuals.scale
@@ -569,8 +665,86 @@ func is_fever_active() -> bool:
 	return fever_active
 
 
+func get_fever_time_left() -> float:
+	return maxf(0.0, _fever_time_left)
+
+
+func get_fever_duration() -> float:
+	return maxf(0.001, _fever_total_duration if _fever_total_duration > 0.0 else fever_duration_sec)
+
+
 func get_fever_speed_multiplier() -> float:
 	return fever_speed_multiplier if fever_active else 1.0
+
+
+func _set_regular_enemies_edible(edible: bool) -> void:
+	for enemy in get_tree().get_nodes_in_group("Enemies"):
+		if not is_instance_valid(enemy) or enemy.is_queued_for_deletion():
+			continue
+		if enemy.has_method("is_boss") and bool(enemy.call("is_boss")):
+			continue
+		if enemy.has_method("set_edible"):
+			enemy.call("set_edible", edible)
+
+
+func try_swallow_enemy(enemy: Node2D) -> bool:
+	if not fever_active or not is_instance_valid(enemy) or enemy.is_queued_for_deletion():
+		return false
+	if not enemy.is_in_group("Enemies"):
+		return false
+	if enemy.has_method("is_boss") and bool(enemy.call("is_boss")):
+		return false
+	if enemy.has_method("is_edible") and not bool(enemy.call("is_edible")):
+		return false
+	if global_position.distance_to(enemy.global_position) > fever_capture_radius:
+		return false
+
+	var score_gain := 120
+	var stability_gain := FEVER_ENEMY_STABILITY_GAIN
+	var growth_points := 2
+	if enemy.has_method("get_score_value"):
+		score_gain = maxi(1, int(round(float(enemy.call("get_score_value")) * fever_enemy_score_multiplier)))
+	if enemy.has_method("get_stability_value"):
+		stability_gain = maxf(0.0, float(enemy.call("get_stability_value")))
+	if enemy.has_method("get_growth_value"):
+		growth_points = maxi(1, int(enemy.call("get_growth_value")))
+
+	var swallow_position := enemy.global_position
+	if enemy.has_method("begin_swallowed"):
+		if not bool(enemy.call("begin_swallowed", global_position, 0.16)):
+			return false
+	else:
+		enemy.queue_free()
+
+	var enemy_heal_bonus := 0.0
+	if has_node("/root/RoguelikeUpgradeManager"):
+		enemy_heal_bonus = float(get_node("/root/RoguelikeUpgradeManager").get_modifier("enemy_swallow_heal"))
+	current_stability = minf(current_stability + stability_gain + enemy_heal_bonus, max_stability)
+	stability_changed.emit(current_stability, max_stability)
+	swallowed_count += growth_points
+	var required := growth_per_level * current_level
+	if swallowed_count >= required and current_level < max_level:
+		current_level += 1
+		level_up.emit(current_level)
+		max_pull_radius += base_growth_per_object * 15.0
+		if current_level == max_level:
+			reached_max_level.emit()
+	var growth_this_time := base_growth_per_object * float(growth_points)
+	growth_this_time *= 1.0 + swallowed_count * exponential_growth_factor
+	max_pull_radius = minf(final_max_radius, max_pull_radius + growth_this_time)
+	_update_collision_and_visuals()
+	_update_shader_params()
+	if enemy in bodies_in_range:
+		bodies_in_range.erase(enemy)
+
+	_fever_enemy_combo_count += 1
+	object_swallowed.emit(score_gain)
+	enemy_killed.emit()
+	fever_enemy_combo.emit(_fever_enemy_combo_count, swallow_position)
+	swallowed_feedback.emit(stability_gain)
+	_bounce_on_swallow(stability_gain)
+	_play_swallow_particles(swallow_position)
+	return true
 
 
 func start_fever(duration_sec: float = -1.0) -> void:
@@ -581,10 +755,13 @@ func start_fever(duration_sec: float = -1.0) -> void:
 	if has_node("/root/RoguelikeUpgradeManager"):
 		d += get_node("/root/RoguelikeUpgradeManager").get_modifier("fever_duration_bonus")
 	fever_active = true
-	_fever_time_left = d
+	_fever_total_duration = maxf(0.001, d)
+	_fever_time_left = _fever_total_duration
 	_fever_absorb_accum = 0.0
 	_fever_enemy_combo_count = 0
-	fever_started.emit(d)
+	_set_regular_enemies_edible(true)
+	fever_started.emit(_fever_total_duration)
+	fever_changed.emit(_fever_time_left, _fever_total_duration)
 	# Fever no longer auto-clears enemies/projectiles.
 	# Enemies are only removed when they actually collide with the core.
 	# Visual feedback: enable a bright aura so Fever is obvious.
@@ -605,7 +782,7 @@ func start_fever(duration_sec: float = -1.0) -> void:
 		fever_particles.amount = max(50, int(fever_particles.amount))
 		fever_particles.emitting = true
 	if _fever_ring and is_instance_valid(_fever_ring):
-		_fever_ring.visible = true
+		_fever_ring.visible = fever_legacy_ring_enabled
 
 
 func _end_fever(silent: bool = false) -> void:
@@ -615,6 +792,7 @@ func _end_fever(silent: bool = false) -> void:
 	_fever_time_left = 0.0
 	_fever_absorb_accum = 0.0
 	_fever_enemy_combo_count = 0
+	_set_regular_enemies_edible(false)
 	# Restore Fever visuals.
 	if fever_particles and is_instance_valid(fever_particles) and not _fever_particles_restore.is_empty():
 		fever_particles.texture = _fever_particles_restore.get("texture", fever_particles.texture)
@@ -629,6 +807,7 @@ func _end_fever(silent: bool = false) -> void:
 		fever_particles.scale_amount_min = float(_fever_particles_restore.get("scale_amount_min", fever_particles.scale_amount_min))
 		fever_particles.scale_amount_max = float(_fever_particles_restore.get("scale_amount_max", fever_particles.scale_amount_max))
 	if not silent:
+		fever_changed.emit(0.0, maxf(0.001, _fever_total_duration))
 		fever_ended.emit()
 	if _fever_ring and is_instance_valid(_fever_ring):
 		_fever_ring.visible = false
@@ -676,7 +855,8 @@ func _ensure_fever_ring() -> void:
 func _update_fever(delta: float) -> void:
 	if not fever_active:
 		return
-	_fever_time_left -= delta
+	_fever_time_left = maxf(0.0, _fever_time_left - maxf(delta, 0.0))
+	fever_changed.emit(_fever_time_left, maxf(0.001, _fever_total_duration))
 	if _fever_time_left <= 0.0:
 		_end_fever(false)
 
@@ -706,6 +886,8 @@ func _absorb_overlapping_enemies_for_fever() -> void:
 
 # 當被敵人射擊或造成懲罰時呼叫
 func shrink_and_eject(amount: float, eject_count: int):
+	if fever_active:
+		return
 	# 1. 減少吞噬總數 (體積代理)
 	var old_count = swallowed_count
 	swallowed_count = max(0, swallowed_count - int(amount))
@@ -783,29 +965,7 @@ func _swallow_body(body: Node2D):
 			if body in bodies_in_range:
 				bodies_in_range.erase(body)
 			return # 處理完敵人，立即退出函式
-		# Fever：視為可吞噬目標（給分 + 回復穩定度）
-		var enemy_gain: float = FEVER_ENEMY_STABILITY_GAIN
-		if body.has_method("get_score_value"):
-			enemy_gain = float(body.get_score_value())
-		var score_gain_enemy: int = int(round(enemy_gain * fever_enemy_score_multiplier))
-		_extend_fever_from_enemy()
-		_fever_enemy_combo_count += 1
-		# Roguelike: enemy_swallow_heal bonus
-		var enemy_heal_bonus: float = 0.0
-		if has_node("/root/RoguelikeUpgradeManager"):
-			enemy_heal_bonus = get_node("/root/RoguelikeUpgradeManager").get_modifier("enemy_swallow_heal")
-		current_stability = min(current_stability + enemy_gain + enemy_heal_bonus, max_stability)
-		stability_changed.emit(current_stability, max_stability)
-		var pos_enemy: Vector2 = body.global_position
-		body.queue_free()
-		if body in bodies_in_range:
-			bodies_in_range.erase(body)
-		object_swallowed.emit(score_gain_enemy)
-		enemy_killed.emit()
-		fever_enemy_combo.emit(_fever_enemy_combo_count, pos_enemy)
-		swallowed_feedback.emit(enemy_gain)
-		_bounce_on_swallow(enemy_gain)
-		_play_swallow_particles(pos_enemy)
+		try_swallow_enemy(body)
 		return
 
 
@@ -949,6 +1109,8 @@ func _on_entropy_death():
 # 熵值邏輯：維持生存壓力
 # ----------------------------------------------------
 func _handle_entropy_decay(delta):
+	if fever_active:
+		return
 	var level_penalty = 1.0 + (current_level * decay_level_scale)
 	level_penalty = min(level_penalty, 2.6)
 	# Roguelike: decay_rate_mult modifier (negative = slower decay)
@@ -971,6 +1133,7 @@ func _handle_entropy_decay(delta):
 # 引力施加 (在 _physics_process 中呼叫)
 # ----------------------------------------------------
 func apply_pull(delta):
+	_bootstrap_overlapping_bodies()
 	# 重要：物體 queue_free 可能不會觸發 exited，避免無效引用累積造成後期卡頓
 	for i in range(bodies_in_range.size() - 1, -1, -1):
 		var b = bodies_in_range[i]
@@ -1008,6 +1171,30 @@ func apply_pull(delta):
 		
 		if body is RigidBody2D:
 			body.apply_central_force(force * delta * 60)
+
+	if fever_active:
+		_apply_fever_enemy_pull(delta)
+
+
+func _apply_fever_enemy_pull(delta: float) -> void:
+	var pull_radius := maxf(_get_current_radius() * fever_pull_radius_multiplier, 1100.0)
+	for enemy in get_tree().get_nodes_in_group("Enemies"):
+		if not is_instance_valid(enemy) or enemy.is_queued_for_deletion() or not (enemy is Node2D):
+			continue
+		if enemy.has_method("is_boss") and bool(enemy.call("is_boss")):
+			continue
+		if enemy.has_method("is_edible") and not bool(enemy.call("is_edible")):
+			continue
+		var enemy_2d := enemy as Node2D
+		var distance := global_position.distance_to(enemy_2d.global_position)
+		if distance <= fever_capture_radius:
+			try_swallow_enemy(enemy_2d)
+			continue
+		if distance > pull_radius:
+			continue
+		var proximity := 1.0 - clampf(distance / pull_radius, 0.0, 1.0)
+		var step := fever_pull_speed * lerpf(0.72, 1.35, proximity) * maxf(delta, 0.0)
+		enemy_2d.global_position = enemy_2d.global_position.move_toward(global_position, step)
 
 
 func _is_overload_active() -> bool:

@@ -1,29 +1,24 @@
-[gd_scene load_steps=12 format=3 uid="uid://dnp568fre8xn0"]
+[gd_scene load_steps=9 format=3 uid="uid://dnp568fre8xn0"]
 
 [ext_resource type="Script" uid="uid://b5lo4xme0i70f" path="res://Scenes/SwallowableObject.gd" id="1_nysfo"]
-[ext_resource type="Texture2D" uid="uid://o5jchgy4kr0b" path="res://Shaders/發光的星星.png" id="2_6cgnt"]
-[ext_resource type="Texture2D" uid="uid://beu3w4pu0n2ke" path="res://Shaders/1.png" id="3_d3qww"]
-[ext_resource type="Texture2D" uid="uid://djm6xcc6lhqwd" path="res://Shaders/2.png" id="4_6fy16"]
-[ext_resource type="Texture2D" uid="uid://653hbi8aevdm" path="res://Shaders/3.png" id="5_u6ae7"]
-[ext_resource type="Texture2D" uid="uid://b6fmuvffd7irs" path="res://Shaders/4.png" id="6_mc4mx"]
-[ext_resource type="Texture2D" uid="uid://dxis7iqrdd630" path="res://Shaders/6.png" id="8_22rij"]
-[ext_resource type="Texture2D" uid="uid://cvidshw5now67" path="res://Shaders/11.png" id="9_7xwr5"]
-[ext_resource type="Texture2D" uid="uid://cmdtjw0wyqvi0" path="res://Shaders/15.png" id="10_vmw6d"]
+[ext_resource type="Texture2D" path="res://Art/Prey/prey_photon_mote.png" id="2_photon"]
+[ext_resource type="Texture2D" path="res://Art/Prey/prey_plasma_seed.png" id="3_plasma"]
+[ext_resource type="Texture2D" path="res://Art/Prey/prey_nebula_prism.png" id="4_prism"]
+[ext_resource type="Texture2D" path="res://Art/Prey/prey_pulsar_core.png" id="5_pulsar"]
+[ext_resource type="Texture2D" path="res://Art/Prey/prey_quantum_relic.png" id="6_relic"]
 
 [sub_resource type="PhysicsMaterial" id="PhysicsMaterial_72ucr"]
 
 [sub_resource type="CircleShape2D" id="CircleShape2D_6cgnt"]
+radius = 52.0
 
 [node name="SwallowableObject" type="RigidBody2D"]
-position = Vector2(27, 26)
-scale = Vector2(0.035, 0.035)
 physics_material_override = SubResource("PhysicsMaterial_72ucr")
 gravity_scale = 0.0
 script = ExtResource("1_nysfo")
-textures = Array[Texture2D]([ExtResource("2_6cgnt"), ExtResource("3_d3qww"), ExtResource("4_6fy16"), ExtResource("5_u6ae7"), ExtResource("6_mc4mx"), ExtResource("8_22rij"), ExtResource("9_7xwr5"), ExtResource("10_vmw6d")])
+textures = Array[Texture2D]([ExtResource("2_photon"), ExtResource("3_plasma"), ExtResource("4_prism"), ExtResource("5_pulsar"), ExtResource("6_relic")])
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="."]
-position = Vector2(-27, -26)
 shape = SubResource("CircleShape2D_6cgnt")
 
 [node name="Sprite2D" type="Sprite2D" parent="."]

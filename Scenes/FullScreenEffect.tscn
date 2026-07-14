@@ -1,11 +1,29 @@
 [gd_scene load_steps=3 format=3 uid="uid://dkqituocsw2ix"]
 
 
-[ext_resource type="Shader" uid="uid://fullscreendistort" path="res://Shaders/FullScreenDistort.gdshader" id="1_fullscreendistort"]
+[ext_resource type="Shader" uid="uid://bvff0w2xmxxm8" path="res://Shaders/FullScreenDistort.gdshader" id="1_fullscreendistort"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_uig3o"]
 shader = ExtResource("1_fullscreendistort")
 shader_parameter/center_uv = Vector2(0.5, 0.5)
+shader_parameter/lens_radius = 0.0
+shader_parameter/lens_strength = 0.0
+shader_parameter/effect_opacity = 0.0
+shader_parameter/animation_speed = 0.35
+shader_parameter/motion_scale = 1.0
+shader_parameter/quality = 2
+shader_parameter/gravity_wave_strength = 0.185
+shader_parameter/gravity_wave_frequency = 19.5
+shader_parameter/gravity_wave_speed = 1.45
+shader_parameter/event_horizon_ratio = 0.17
+shader_parameter/event_horizon_softness = 0.045
+shader_parameter/photon_arc_ratio = 0.235
+shader_parameter/photon_arc_width = 0.012
+shader_parameter/photon_arc_energy = 0.58
+shader_parameter/glass_color = Color(0.12, 0.78, 0.94, 1)
+shader_parameter/cold_arc_color = Color(0.28, 0.88, 1, 1)
+shader_parameter/warm_arc_color = Color(1, 0.82, 0.46, 1)
+shader_parameter/core_color = Color(0.0015, 0.004, 0.012, 1)
 shader_parameter/distort_radius = 0.0
 shader_parameter/distort_strength = 0.0
 shader_parameter/distort_speed = 0.0
@@ -20,7 +38,7 @@ material = SubResource("ShaderMaterial_uig3o")
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_bottom = 9.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
+color = Color(1, 1, 1, 1)
